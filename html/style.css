@@ -170,3 +170,12 @@ option { direction: rtl; font-family: sans-serif}
 .l2sort:hover{text-decoration:underline}
 .l2arrow{opacity:0.55;font-size:0.85em}
 .l2filter{width:100%;box-sizing:border-box;font-weight:normal;font-size:0.9em}
+
+.tab-bar { display: flex; border-bottom: 2px solid #226; margin-bottom: 0; padding-bottom: 0; }
+.tab-btn { padding: 10px 20px; background-color: #ddf; border: none; cursor: pointer; font-size: 1em; border-radius: 8px 8px 0 0; margin-right: 4px; }
+.tab-btn:hover { background-color: #aaf; }
+.tab-btn.active { background-color: #aaf; font-weight: bold; border-bottom: 2px solid #aaf; margin-bottom: -2px; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+table.disc td, table.disc th { padding: 3px 10px; }
+.summ td:first-child { font-weight: bold; width: 14em; }

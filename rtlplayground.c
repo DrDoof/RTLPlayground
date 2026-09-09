@@ -12,6 +12,7 @@
 #include "rtl837x_phy.h"
 #include "rtl837x_port.h"
 #include "rtl837x_stp.h"
+#include "rtl837x_lldp.h"
 #include "rtl837x_lacp.h"
 #include "rtl837x_igmp.h"
 #include "rtl837x_leds.h"
@@ -305,6 +306,23 @@ void itoa(uint8_t v)
 /* Same as itoa(), one decade wider: enough for a port number. Kept separate
  * rather than widening itoa() itself, because every existing caller passes a
  * byte and would start paying for 16-bit divisions it does not need. */
+// Prints an IPv4 address.
+void print_ip(__xdata uint8_t * ptr)
+{
+	uint8_t idx = 0;
+	uint8_t num;
+
+	while(1) {
+		num = *ptr++;
+		itoa(num);
+		if (++idx == 4)
+			break;
+
+		write_char('.');
+	}
+}
+
+
 void itoa_short(uint16_t v)
 {
 	uint8_t t = v / 10000;
@@ -890,6 +908,7 @@ void print_phys_port(uint8_t port)
 }
 
 
+
 /*
 // TODO: This uses 2 DSEG bytes and is not used!
 void print_sds_reg(uint8_t sds_id, uint8_t page, uint8_t reg)
@@ -1234,7 +1253,7 @@ void handle_rx(void)
 		print_byte(uip_buf[3]); print_byte(uip_buf[4]); print_byte(uip_buf[5]); write_char('\n');
 		print_string(" MGMT-VLAN: "); print_short(management_vlan); write_char('\n');
 #endif
-		if ((stp_enabled || lacpEnabled) && uip_buf[0] == 0x01 && uip_buf[1] == 0x80
+		if ((stp_enabled || lacpEnabled || lldpEnabled) && uip_buf[0] == 0x01 && uip_buf[1] == 0x80
 			&& uip_buf[2] == 0xc2 && uip_buf[3] == 0x00 && uip_buf[4] == 0x00) { // 01:80:C2:00:00:0x
 			if (stp_enabled && uip_buf[5] == 0x00) {		// STP/RSTP BPDU
 				stp_in();
@@ -1246,7 +1265,13 @@ void handle_rx(void)
 				lacp_in();
 				if (uip_len)
 					tcpip_output();
+			} else if (lldpEnabled && uip_buf[5] == 0x0e) {	// LLDPDU
+				lldp_in();
 			}
+		} else if (lldpEnabled && uip_buf[0] == 0x01 && uip_buf[1] == 0x00
+			&& uip_buf[2] == 0x0c && uip_buf[3] == 0xcc && uip_buf[4] == 0xcc
+			&& uip_buf[5] == 0xcc) {	// CDP multicast
+			cdp_in();
 		} else if (igmpEnabled && uip_buf[0] == 0x01 && uip_buf[1] == 0x00 && uip_buf[2] == 0x5e // IPv4-MC packet?
 			&& uip_buf[3] == 0x00 && uip_buf[4] == 0x00 && uip_buf[5] == 0x16) {
 			igmp_packet_handler();
@@ -1639,6 +1664,9 @@ void idle(void)
 	// If LACP enabled, drive its machines (own tick divider lives in the banked module)
 	if (lacpEnabled)
 		lacp_timers();
+	// LLDP/CDP: neighbor aging + periodic TX (own ~1 Hz prescaler inside)
+	if (lldpEnabled)
+		lldp_timers();
 	health_phase(HEALTH_PH_STP);
 	// Check whether a command is waiting in the cmd_buffer and execute
 	if (cmd_available) {
@@ -2343,6 +2371,7 @@ void main(void)
 	stp_defaults();		/* 802.1D/w default config before any "stp ..." replay */
 	lacpEnabled = 0;
 	lacp_init();		/* clear per-LAG state (port->LAG map = NONE) before any config replay */
+	lldp_init();		/* discovery defaults before any "lldp ..." replay */
 	nic_setup();
 	vlan_setup();
 	port_l2_setup();

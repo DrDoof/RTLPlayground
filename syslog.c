@@ -4,8 +4,8 @@
 #include "uip/uip.h"
 #include "rtl837x_common.h"
 
-#pragma codeseg BANK2
-#pragma constseg BANK2
+#pragma codeseg BANK1
+#pragma constseg BANK1
 
 #define SYSLOG_P ((__xdata uint8_t *)uip_appdata)
 

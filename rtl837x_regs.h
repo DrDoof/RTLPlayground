@@ -275,6 +275,7 @@
  * reached handle_rx once 0x4ed4 was set to forward, never with trap). TRAP
  * (op 1) routes to a hardware trap path this firmware does not read. */
 #define RTL837X_RMA_ACT_FORWARD		0x00000000
+#define RTL837X_RMA_ACT_TRAP		0x00000010	/* op 1 << lsb 4: to CPU only, NOT forwarded */
 #define RTL837X_RMA_ACT_DROP		0x00000020	/* op 2 << lsb 4 */
 #define RTL837X_RMA_CONF		0x4f1c
 #define RTL837X_MSTP_STATES		0x5310

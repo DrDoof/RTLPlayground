@@ -915,6 +915,7 @@ document.addEventListener('DOMContentLoaded', function() {
    + "<li><a href='#/stp'>Spanning Tree</a></li>"
    + "<li><a href='#/mirror' data-i18n='nav_mirror'>Mirroring</a></li>"
    + "<li><a href='#/lag' data-i18n='nav_lag'>Link Aggregation</a></li>"
+   + "<li><a href='#/lldp'>LLDP</a></li>"
    + "<li><a href='#/eee' data-i18n='nav_eee'>EEE</a></li>"
    + "<li><a href='#/bandwidth' data-i18n='nav_bandwidth'>Bandwidth Limits</a></li>"
    + "<li><a href='#/system' data-i18n='nav_system'>System Settings</a></li>"
@@ -1027,6 +1028,10 @@ const conf_cmds = [
   /^mtu\s+\d{1,2}\s+\d+$/,
   /^bw\s+(in|out)\s+\d{1,2}\s+\S+$/,
   /^hostname\s+.{1,23}$/,
+  /^lldp\s+(on|off)$/,
+  /^lldp\s+tx\s+(on|off)$/,
+  /^lldp\s+port\s+\d{1,2}\s+tx\s+(on|off)$/,
+  /^lldp\s+interval\s+\d{1,3}$/,
 ];
 /* Commands that come in an on/off pair replace each other, which the list
  * below cannot express: it drops lines starting with the text it matched, and
@@ -1062,6 +1067,10 @@ const conf_overwrite = [
   /^mtu\s+\d{1,2}\b/,
   /^bw\s+(in|out)\s+\d{1,2}\b/,
   /^hostname\b/,
+  /^lldp\s+(on|off)\b/,
+  /^lldp\s+tx\s+(on|off)\b/,
+  /^lldp\s+port\s+\d{1,2}\s+tx\b/,
+  /^lldp\s+interval\b/,
 ];
 
 function parseConf(s){
@@ -2336,6 +2345,123 @@ sectionInits.lag = function() {
     setSectionInterval(fetchLacp, 2000);
   });
 };
+
+
+var lldpDirty = false;
+var portRows = 0;
+
+function lldpTab(evt, id) {
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  evt.currentTarget.classList.add('active');
+}
+
+async function lldpCmd(cmd) {
+  lldpDirty = true;
+  try { await fetch('/cmd', { method: 'POST', body: cmd }); }
+  catch(err) { console.error(`Error: ${err}`); }
+  lldpDirty = false;
+  fetchLldp();
+}
+
+function mac(h) { return h ? h.replace(/(..)(?=.)/g, "$1:").toUpperCase() : ""; }
+
+function buildPortRows(n) {
+  const tbl = document.getElementById("portTbl");
+  for (let p = 1; p <= n; p++) {
+    const tr = tbl.insertRow();
+    tr.insertCell().textContent = p;
+    tr.insertCell().id = "pmode_" + p;
+    const sel = document.createElement("select");
+    for (const v of ["off","on"]) {
+      const o = document.createElement("option");
+      o.value = v; o.textContent = v == "on" ? "Enabled" : "Disabled";
+      sel.appendChild(o);
+    }
+    sel.addEventListener("change", e => lldpCmd("lldp port " + p + " tx " + e.target.value));
+    sel.id = "ptx_" + p;
+    tr.insertCell().appendChild(sel);
+  }
+  const stat = document.getElementById("statTbl");
+  for (let p = 1; p <= n; p++) {
+    const tr = stat.insertRow();
+    tr.insertCell().textContent = p;
+    tr.insertCell().id = "stx_" + p;
+    tr.insertCell().id = "srx_" + p;
+  }
+  portRows = n;
+}
+
+function fetchLldp() {
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      const s = JSON.parse(xhttp.responseText);
+      const nPorts = s.tx ? s.tx.length : 9;
+      if (!portRows) buildPortRows(nPorts);
+
+      // --- Neighbors ---
+      const tbl = document.getElementById("nbTbl");
+      while (tbl.rows.length > 1) tbl.deleteRow(1);
+      s.nb.sort((a, b) => a.p - b.p);
+      for (const n of s.nb) {
+        const tr = tbl.insertRow();
+        tr.insertCell().textContent = n.p;
+        tr.insertCell().textContent = n.pr == 2 ? "CDP" : "LLDP";
+        tr.insertCell().textContent = n.sys;
+        tr.insertCell().textContent = n.pid;
+        tr.insertCell().textContent = mac(n.ch);
+        tr.insertCell().textContent = n.ttl;
+      }
+      if (!s.nb.length) {
+        const td = tbl.insertRow().insertCell();
+        td.colSpan = 6; td.textContent = "(no neighbors heard yet)";
+      }
+
+      // --- Statistics (live) ---
+      for (let i = 0; i < nPorts; i++) {
+        document.getElementById("stx_" + (i + 1)).textContent = s.tx[i];
+        document.getElementById("srx_" + (i + 1)).textContent = s.rx[i];
+      }
+      // --- Port Setting mode (live) ---
+      for (let p = 1; p <= nPorts; p++) {
+        const tx = (s.txm & (1 << (p - 1))) ? 1 : 0;
+        document.getElementById("pmode_" + p).textContent = tx ? "Rx and Tx" : "Rx only";
+      }
+      // --- Local Information (live) ---
+      document.getElementById("locMac").textContent = mac(s.mac);
+      document.getElementById("locName").textContent = s.sn || "";
+      document.getElementById("locIp").textContent = s.ip || "";
+
+      if (lldpDirty) return;
+      // --- Property / editable controls ---
+      document.getElementById("lldpMode").value = s.on ? "on" : "off";
+      document.getElementById("lldpIv").value = s.iv;
+      document.getElementById("lldpTtl").textContent = s.iv * 3;
+      document.getElementById("lldpTx").value = (s.txm > 0) ? "on" : "off";
+      for (let p = 1; p <= nPorts; p++)
+        document.getElementById("ptx_" + p).value = (s.txm & (1 << (p - 1))) ? "on" : "off";
+    }
+  };
+  xhttp.open("GET", `/lldp.json`, true);
+  sendXHTTP(xhttp);
+}
+
+sectionInits.lldp = function() {
+  document.getElementById("lldpMode").onchange =
+    e => lldpCmd("lldp " + e.target.value);
+  document.getElementById("lldpIv").onchange =
+    e => lldpCmd("lldp interval " + e.target.value);
+  document.getElementById("lldpTx").onchange =
+    e => lldpCmd("lldp tx " + e.target.value);
+  update( () => {
+    fetchLldp();
+    setSectionInterval(update, 2000);
+    setSectionInterval(fetchLldp, 5000);
+  });
+};
+
 
 var mirrorInterval = Number();
 const mirrors = ["mPortsTX", "mPortsRX"];

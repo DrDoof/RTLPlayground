@@ -14,6 +14,7 @@
 #include "rtl837x_regs.h"
 #include "rtl837x_sfr.h"
 #include "rtl837x_stp.h"
+#include "rtl837x_lldp.h"
 #include "rtl837x_lacp.h"
 #include "rtl837x_igmp.h"
 #include "rtl837x_bandwidth.h"
@@ -354,21 +355,6 @@ err:
 	return 0;
 }
 
-// Prints an IPv4 address.
-void print_ip(__xdata uint8_t * ptr)
-{
-	uint8_t idx = 0;
-	uint8_t num;
-
-	while(1) {
-		num = *ptr++;
-		itoa(num);
-		if (++idx == 4)
-			break;
-
-		write_char('.');
-	}
-}
 
 
 void parse_lag(void)
@@ -1749,6 +1735,8 @@ void cmd_parser(void) __banked
 			}
 		} else if (cmd_compare(0, "stp")) {
 			stp_parse();
+		} else if (cmd_compare(0, "lldp")) {
+			lldp_parse();
 		} else if (cmd_compare(0, "lacp")) {
 			if (cmd_compare(1, "show"))
 				lacp_show();

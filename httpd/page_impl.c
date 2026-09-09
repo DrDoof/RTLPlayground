@@ -14,6 +14,7 @@
 #include "machine.h"
 #include "rtl837x_stp.h"
 #include "rtl837x_lacp.h"
+#include "rtl837x_lldp.h"
 #include "page_impl.h"
 #include "syslog.h"
 
@@ -204,6 +205,8 @@ void sfp_send_data(uint8_t slot, uint8_t reg, uint8_t len)
 		byte_to_html(sfp_buf[i]);
 }
 
+
+static uint16_t strtox_x(__xdata uint8_t *dst, __xdata char *src);
 
 void send_basic_info(void)
 {
@@ -587,6 +590,90 @@ static void bridge_to_html(void)
 		byte_to_html(pi_mac[i]);
 }
 
+__xdata uint8_t pi_i, pi_j, pi_j2;	/* shared loop iterators (DSEG relief) */
+
+/* Append a NUL-terminated xdata string (no escaping - caller guarantees
+ * the content is JSON-safe, cf. the LLDP ingest sanitizer). */
+static uint16_t strtox_x(__xdata uint8_t *dst, __xdata char *src)
+{
+	uint16_t n = 0;
+	while (*src) {
+		*dst++ = *src++;
+		n++;
+	}
+	return n;
+}
+
+
+/* Neighbor table for the Neighbors page ("/lldp.json"). Strings in the
+ * table were sanitized on ingest (rtl837x_lldp.c), safe to emit verbatim. */
+void send_lldp(void)
+{
+	slen = strtox(outbuf, HTTP_RESPONCE_JSON);
+	slen += strtox(outbuf + slen, "{\"on\":");
+	itoa_html(lldpEnabled);
+	slen += strtox(outbuf + slen, ",\"iv\":");
+	itoa_html(lldp_interval_s);
+	slen += strtox(outbuf + slen, ",\"txm\":");
+	itoa16_html(lldp_txmask);
+	slen += strtox(outbuf + slen, ",\"sn\":\"");
+	slen += strtox_x(outbuf + slen, hostname);
+	/* Local Information: our chassis MAC + management IPv4 */
+	slen += strtox(outbuf + slen, "\",\"mac\":\"");
+	for (pi_j2 = 0; pi_j2 < 6; pi_j2++)
+		byte_to_html(uip_ethaddr.addr[pi_j2]);
+	slen += strtox(outbuf + slen, "\",\"ip\":\"");
+	itoa_html(uip_hostaddr[0]); char_to_html('.');
+	itoa_html(uip_hostaddr[0] >> 8); char_to_html('.');
+	itoa_html(uip_hostaddr[1]); char_to_html('.');
+	itoa_html(uip_hostaddr[1] >> 8);
+	/* Statistics: per-port TX/RX LLDPDU counters (physical port order) */
+	slen += strtox(outbuf + slen, "\",\"tx\":[");
+	for (pi_i = machine.min_port; pi_i <= machine.max_port; pi_i++) {
+		if (pi_i != machine.min_port) outbuf[slen++] = ',';
+		itoa16_html(lldp_tx_cnt[pi_i]);
+	}
+	slen += strtox(outbuf + slen, "],\"rx\":[");
+	for (pi_i = machine.min_port; pi_i <= machine.max_port; pi_i++) {
+		if (pi_i != machine.min_port) outbuf[slen++] = ',';
+		itoa16_html(lldp_rx_cnt[pi_i]);
+	}
+	outbuf[slen++] = ']';
+	slen += strtox(outbuf + slen, ",\"nb\":[");
+	pi_j = 0;	/* entries emitted */
+	for (pi_i = 0; pi_i < LLDP_NB_MAX; pi_i++) {
+		if (!lldp_nb[pi_i].proto)
+			continue;
+		if (pi_j++)
+			outbuf[slen++] = ',';
+		slen += strtox(outbuf + slen, "{\"p\":");
+		itoa_html(machine.log_to_phys_port[lldp_nb[pi_i].port]);
+		slen += strtox(outbuf + slen, ",\"pr\":");
+		itoa_html(lldp_nb[pi_i].proto);
+		slen += strtox(outbuf + slen, ",\"ch\":\"");
+		if (lldp_nb[pi_i].proto == 1) {
+			for (pi_j2 = 0; pi_j2 < 6; pi_j2++)
+				byte_to_html(lldp_nb[pi_i].chassis[pi_j2]);
+		}
+		slen += strtox(outbuf + slen, "\",\"pid\":\"");
+		slen += strtox_x(outbuf + slen, (__xdata char *)lldp_nb[pi_i].portid);
+		slen += strtox(outbuf + slen, "\",\"sys\":\"");
+		slen += strtox_x(outbuf + slen, (__xdata char *)lldp_nb[pi_i].sysname);
+		slen += strtox(outbuf + slen, "\",\"ttl\":");
+		itoa16_html(lldp_nb[pi_i].ttl);
+		outbuf[slen++] = '}';
+	}
+	slen += strtox(outbuf + slen, "]}");
+}
+
+
+/* STP status + configuration for the Spanning Tree page ("/stp.json").
+ * Bridge config (prio index 0-15, hello/maxage/fwd seconds, rstp flag, tx
+ * hold), elected root (priority byte + MAC), our path cost, root port, TC
+ * counter, and per port: physical number, live ASIC state (2-bit MSTP field:
+ * 0 Dis 1 Blk 2 Lrn 3 Fwd), an approximated role, and the per-port config
+ * (enabled, edge admin/auto/oper, cost/1000, prio, guard, filter, tripped). */
+__xdata uint8_t stp_we_root;
 
 void send_stp(void)
 {

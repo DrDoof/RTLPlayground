@@ -209,6 +209,57 @@
       <div class="hashsel">Load-balancing hash: <select id="hsel3"></select></div>
     </div>
 
+    <div class="page" id="page-lldp" style="margin-left:16%;padding:1px 16px;height:1000px;">
+      <div class="tab-bar">
+        <button class="tab-btn active" onclick="lldpTab(event,'tab-neighbors')">Neighbors</button>
+        <button class="tab-btn" onclick="lldpTab(event,'tab-property')">Property</button>
+        <button class="tab-btn" onclick="lldpTab(event,'tab-port')">Port Setting</button>
+        <button class="tab-btn" onclick="lldpTab(event,'tab-local')">Local Information</button>
+        <button class="tab-btn" onclick="lldpTab(event,'tab-stats')">Statistics</button>
+      </div>
+      <div id="tab-neighbors" class="tab-content active">
+        <h1>LLDP / CDP Neighbors</h1>
+        <table id="nbTbl" class="disc">
+          <tr><th>Port</th><th>Protocol</th><th>System Name</th><th>Remote Port</th><th>Chassis ID</th><th>TTL [s]</th></tr>
+        </table>
+      </div>
+      <div id="tab-property" class="tab-content">
+        <h1>LLDP Property</h1>
+        <table class="disc summ">
+          <tr><td>LLDP State</td><td><select id="lldpMode"><option value="on">Enabled</option><option value="off">Disabled</option></select></td></tr>
+          <tr><td>TX Interval [s]</td><td><input id="lldpIv" type="number" min="5" max="255" style="width:5em"></td></tr>
+          <tr><td>Hold Multiplier</td><td><span id="lldpHold">3</span> (TTL = interval &times; 3)</td></tr>
+          <tr><td>TTL [s]</td><td id="lldpTtl">-</td></tr>
+        </table>
+      </div>
+      <div id="tab-port" class="tab-content">
+        <h1>LLDP Port Setting</h1>
+        <p>TX all ports: <select id="lldpTx"><option value="off">Disabled (RX only)</option><option value="on">Enabled</option></select></p>
+        <table id="portTbl" class="disc">
+          <tr><th>Port</th><th>Mode</th><th>TX</th></tr>
+        </table>
+      </div>
+      <div id="tab-local" class="tab-content">
+        <h1>Local Information</h1>
+        <h2>Device Summary</h2>
+        <table class="disc summ">
+          <tr><td>Chassis ID Subtype</td><td>MAC address</td></tr>
+          <tr><td>Chassis ID</td><td id="locMac">-</td></tr>
+          <tr><td>System Name</td><td id="locName">-</td></tr>
+          <tr><td>System Description</td><td>RTLPlayground &ndash; SWTGW218AS</td></tr>
+          <tr><td>Capabilities</td><td>Bridge</td></tr>
+          <tr><td>Management Address</td><td id="locIp">-</td></tr>
+        </table>
+        <p style="font-size:small">System Name is configured in <a href='#/system'>System Settings</a> (hostname).</p>
+      </div>
+      <div id="tab-stats" class="tab-content">
+        <h1>LLDP Statistics</h1>
+        <table id="statTbl" class="disc">
+          <tr><th>Port</th><th>TX Frames</th><th>RX Frames</th></tr>
+        </table>
+      </div>
+    </div>
+
     <div class="page" id="page-eee" style="margin-left:16%;padding:1px 16px;height:1000px;">
       <h1 data-i18n="eee_heading">EEE Status</h1>
       <table id="eeetable">
