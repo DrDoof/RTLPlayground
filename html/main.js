@@ -629,8 +629,6 @@ function linkText(idx) { var v = linkS[idx]; return typeof v === 'function' ? v(
 var logToPhysPort = new Int8Array(10);
 var physToLogPort = new Int8Array(10);
 var portNames = new Array(10);
-var currentRequests = [];
-var currentCallback;
 function drawPorts() {
   var f = document.getElementById('ports');
   console.log("DRAWING PORTS: ", numPorts);
@@ -842,65 +840,56 @@ function rxLosHTML(pinStatus, moduleStatus) {
   return moduleStatus ?? pinStatus;
 }
 
-function callbackXHTTP()
-{
-  x = currentRequests.shift();
-  x.onreadystatechange = currentCallback;
-  x.onreadystatechange();
-  if (currentRequests.length === 0)
-    return;
-  x = currentRequests[0];
-  currentCallback = x.onreadystatechange;
-  x.onreadystatechange = callbackXHTTP;
-  var retries = 10;
-  while (retries) {
-    try {
-      setTimeout(() => {
-              x.send();
-              console.log("B1");
-      }, 20);
-    } catch (error) {
-      retries--;
-      setTimeout(() => {
-        console.log(`Retry ${retries}/${maxRetries} failed: ${error.message}`);
-      }, 200);
-      if (retries < 1) {
-        throw error;
-      }
-    }
-    console.log("B2");
-    return;
-  }
-}
+var netChain = Promise.resolve();
 
 function sendXHTTP(x)
 {
-  console.log("sendXHTTP ", x);
-  if (currentRequests.length === 0) {
-    currentRequests.push(x);
-    currentCallback = x.onreadystatechange;
-    x.onreadystatechange = callbackXHTTP;
-    var retries = 10;
-    while (retries) {
+  netChain = netChain.then(function() {
+    return new Promise(function(resolve) {
+      var done = false;
+      var finish = function() {
+        if (done)
+          return;
+        done = true;
+        resolve();
+      };
+      var real = x.onreadystatechange;
+      x.onreadystatechange = function() {
+        if (real)
+          real.call(x);
+        if (x.readyState === 4)
+          finish();
+      };
+      x.onerror = finish;
+      x.ontimeout = finish;
+      if (!x.timeout)
+        x.timeout = 10000;
       try {
         x.send();
-        console.log("A1");
-      } catch (error) {
-        retries--;
-        setTimeout(() => {
-          console.log(`Retry ${retries}/${maxRetries} failed: ${error.message}`);
-        }, 200);
-        if (retries < 1) {
-          throw error;
-        }
+      } catch (e) {
+        finish();
       }
-      console.log("A2");
-      return;
-    }
-    console.log("A3");
-    return;
-  }
-  currentRequests.push(x);
+    });
+  });
+}
+
+function qfetch(url, opts)
+{
+  var run = function() {
+    return fetch(url, opts).then(function(r) {
+      return r.clone().arrayBuffer().then(function() { return r; });
+    });
+  };
+  var p = netChain.then(run, run);
+  netChain = new Promise(function(resolve) {
+    var t = setTimeout(resolve, 15000);
+    var go = function() {
+      clearTimeout(t);
+      resolve();
+    };
+    p.then(go, go);
+  });
+  return p;
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -935,6 +924,7 @@ document.addEventListener('DOMContentLoaded', function() {
  * shown.  Each section initialises on first display, and its polling
  * intervals run only while the section is visible. */
 var sectionIntervals = [];
+var l2WalkGen = 0;
 var sectionInits = {};
 
 function setSectionInterval(fn, ms) {
@@ -954,6 +944,7 @@ function clearSectionIntervals() {
     clearTimeout(devTimer);
     devTimer = null;
   }
+  l2WalkGen++;
 }
 
 function showSection(name) {
@@ -969,8 +960,42 @@ window.addEventListener('hashchange', function() {
   showSection((location.hash || '#/overview').replace(/^#\//, ''));
 });
 
+var svgWarm = null;
+var svgNode = {};
+
+function warmPortSvgs() {
+  if (svgWarm) return svgWarm;
+  svgWarm = Promise.all(['port.svg', 'sfp.svg'].map(function(u) {
+    return qfetch(u)
+      .then(function(r) { return r.ok ? r.text() : null; })
+      .then(function(txt) {
+        if (!txt) return;
+        var doc = new DOMParser().parseFromString(txt, 'image/svg+xml');
+        var el = doc.documentElement;
+        if (el && el.nodeName.toLowerCase() === 'svg')
+          svgNode[u] = el;
+      })
+      .catch(function() {});
+  }));
+  return svgWarm;
+}
+
+function svgIcon(u, size) {
+  var el;
+  if (svgNode[u]) {
+    el = document.importNode(svgNode[u], true);
+  } else {
+    el = document.createElement('img');
+    el.src = u;
+  }
+  el.setAttribute('width', size);
+  el.setAttribute('height', size);
+  return el;
+}
+
 document.addEventListener('DOMContentLoaded', function() {
   if (!document.getElementById('page-overview')) return; // not index.html (e.g. login.html)
+  warmPortSvgs();
   showSection((location.hash || '#/overview').replace(/^#\//, ''));
 });
 
@@ -1116,7 +1141,7 @@ function parseConf(s){
 
 async function fetchConfig() {
   try {
-    const response = await fetch('/config');
+    const response = await qfetch('/config');
     console.log("CONFIG: ", response);
     const t = await response.text();
     return t;
@@ -1127,7 +1152,7 @@ async function fetchConfig() {
 
 async function fetchCmdLog() {
   try {
-    const response = await fetch('/cmd_log');
+    const response = await qfetch('/cmd_log');
     console.log("CMD-Log: ", response);
     const t = await response.text();
     return t;
@@ -1162,7 +1187,7 @@ async function ipSub() {
     cmd += ips[i]+' '+document.getElementById(ips[i]).value+'\n';
   }
   try {
-    const response = await fetch('/cmd', {
+    const response = await qfetch('/cmd', {
       method: 'POST',
       body: cmd
     });
@@ -1178,7 +1203,7 @@ async function cmdSub() {
   const out = document.getElementById('console_out');
   const cmd = input.value;
   try {
-    const response = await fetch('/cmd', {
+    const response = await qfetch('/cmd', {
       method: 'POST',
       body: cmd
     });
@@ -1203,7 +1228,7 @@ async function cmdSub() {
 
 async function hostSub() {
   const h = document.getElementById("hostname").value;
-  try { await fetch('/cmd', { method: 'POST', body: "hostname " + h }); }
+  try { await qfetch('/cmd', { method: 'POST', body: "hostname " + h }); }
   catch(err) { console.error(`Error: ${err}`); }
   fetchIP();
 }
@@ -1217,13 +1242,13 @@ async function sendConfig(c) {
   form.append("MAX_FILE_SIZE", "4096");
   form.append("configuration", new Blob([c], {type: "application/octet-stream"}), "config.txt");
   try {
-    const response = await fetch('/config', {
+    const response = await qfetch('/config', {
       method: 'POST',
       body: form
     });
     console.log('Completed!', response);
     try {
-      await fetch('/cmd_log_clear', { method: 'GET' });
+      await qfetch('/cmd_log_clear', { method: 'GET' });
     } catch(e) {}
   } catch(err) {
     console.error(`Error: ${err}`);
@@ -1251,7 +1276,7 @@ async function flashStartupSave() {
   sendConfig(configContent);
   // Clear the command log 1 second after initiating the config save
   setTimeout(() => {
-    fetch('/cmd_log_clear', { method: 'GET' })
+    qfetch('/cmd_log_clear', { method: 'GET' })
       .then(response => console.log('Command log cleared', response))
       .catch(err => console.error('Error clearing command log:', err));
   }, 1000);
@@ -1301,14 +1326,14 @@ function fetchIP() {
       };
     }
   xhttp.open("GET", `/information.json`, true);
-  xhttp.send();
+  sendXHTTP(xhttp);
 }
 
 function resetSwitch() {
   if (!confirm(t('sys_reset_confirm'))) {
     return;
   }
-  fetch('/reset', { method: 'GET' }).catch(() => {});
+  qfetch('/reset', { method: 'GET' }).catch(() => {});
   setTimeout(() => {
     alert(t('sys_resetting'));
   }, 3000);
@@ -1326,7 +1351,7 @@ var mgmtVlanCurrent = 0;
 function loadMgmtVlan() {
   var sel = document.getElementById('mgmtvlan');
   if (!sel) return;
-  fetch('/vlanlist').then(function(r) { return r.json(); }).then(function(d) {
+  qfetch('/vlanlist').then(function(r) { return r.json(); }).then(function(d) {
     var cur = d.mgmt || 0;
     var list = d.vlan || [];
     mgmtVlanCurrent = cur;
@@ -1355,7 +1380,7 @@ function mgmtVlanChanged() {
     sel.value = mgmtVlanCurrent;
     return;
   }
-  fetch('/cmd', { method: 'POST', body: 'vlan ' + id + ' mgmt' })
+  qfetch('/cmd', { method: 'POST', body: 'vlan ' + id + ' mgmt' })
     .then(function() { mgmtVlanCurrent = id; })
     .catch(function(err) { console.error('Set management VLAN failed:', err); sel.value = mgmtVlanCurrent; });
 }
@@ -1450,7 +1475,7 @@ async function applySpeed(port) {
     cmd = cmd + "off";
   console.log("CMD: " + cmd);
   try {
-    const response = await fetch('/cmd', {
+    const response = await qfetch('/cmd', {
       method: 'POST',
       body: cmd
     });
@@ -1470,7 +1495,7 @@ async function applyMTU(port) {
   var mtu = document.getElementById('mtu_sel_' + port).value;
   var cmd = "mtu " + port + " " + mtu;
   try {
-    const response = await fetch('/cmd', {
+    const response = await qfetch('/cmd', {
       method: 'POST',
       body: cmd
     });
@@ -1798,7 +1823,8 @@ function delL2(idx) {
     }
   };
   xhttp.open("GET", "/l2_del.json?idx=" + idx, true);
-  xhttp.timeout = 1500; xhttp.send();
+  xhttp.timeout = 1500;
+  sendXHTTP(xhttp);
 }
 
 var l2All = [];
@@ -1937,12 +1963,7 @@ function vlanForm() {
     inp.type = "checkbox"; inp.setAttribute("class","psel");
     inp.id = "tport" + i;
     inp.setAttribute('onclick', `setC("u", ${i}, false);`);
-    const o = document.createElement("img");
-    if (pIsSFP[i - 1]) {
-      o.src = "sfp.svg"; o.width ="60"; o.height ="60";
-    } else {
-      o.src = "port.svg"; o.width = "40"; o.height = "40";
-    }
+    const o = pIsSFP[i - 1] ? svgIcon("sfp.svg", 60) : svgIcon("port.svg", 40);
     l.appendChild(inp); l.appendChild(o);
     d.appendChild(l)
     t.appendChild(d);
@@ -2024,25 +2045,45 @@ function portsToRange(mask, nPorts) {
   return parts.length ? parts.join(',') : '-';
 }
 
-async function loadVlanTable() {
+var vlanTableGen = 0;
+
+async function loadVlanTable(vlans) {
   var tbody = document.getElementById('vlanTableBody');
   if (!tbody) return;
-  tbody.innerHTML = '';
-  var resp;
-  try { resp = await fetch('/vlanlist'); } catch(e) { return; }
-  if (!resp.ok) return;
-  var vlans = (await resp.json()).vlan || [];
+  var gen = ++vlanTableGen;
+  if (!vlans) {
+    var resp;
+    try { resp = await qfetch('/vlanlist'); } catch(e) { return; }
+    if (gen !== vlanTableGen) return;
+    if (resp.status === 401) {
+      window.location.href = 'login.html';
+      return;
+    }
+    if (!resp.ok) return;
+    vlans = (await resp.json()).vlan || [];
+  }
+  var frag = document.createDocumentFragment();
   for (var i = 0; i < vlans.length; i++) {
     var v = vlans[i];
-    var vresp;
-    try { vresp = await fetch('/vlan.json?vid=' + v.id); } catch(e) { continue; }
-    if (!vresp.ok) continue;
-    var s = await vresp.json();
-    var m = parseInt(s.members, 16);
-    var members = m & 0x3FF;
-    var untag   = ((m >> 10) & 0x3FF) & members;
-    var tagged  = members & ~untag;
-    var pvid    = parseInt(s.pvid, 16) & 0x3FF;
+    var vresp = null;
+    var s = null;
+    try { vresp = await qfetch('/vlan.json?vid=' + v.id); } catch(e) { vresp = null; }
+    if (gen !== vlanTableGen) return;
+    if (vresp && vresp.status === 401) {
+      window.location.href = 'login.html';
+      return;
+    }
+    if (vresp && vresp.ok) {
+      try { s = await vresp.json(); } catch(e) { s = null; }
+    }
+    var members = 0, untag = 0, tagged = 0, pvid = 0;
+    if (s) {
+      var m = parseInt(s.members, 16);
+      members = m & 0x3FF;
+      untag   = ((m >> 10) & 0x3FF) & members;
+      tagged  = members & ~untag;
+      pvid    = parseInt(s.pvid, 16) & 0x3FF;
+    }
     var tr = document.createElement('tr');
     var td, a, btn;
     td = document.createElement('td');
@@ -2060,13 +2101,13 @@ async function loadVlanTable() {
     td = document.createElement('td');
     td.textContent = v.name || ''; tr.appendChild(td);
     td = document.createElement('td');
-    td.textContent = portsToRange(members, numPorts); tr.appendChild(td);
+    td.textContent = s ? portsToRange(members, numPorts) : '?'; tr.appendChild(td);
     td = document.createElement('td');
-    td.textContent = portsToRange(tagged, numPorts); tr.appendChild(td);
+    td.textContent = s ? portsToRange(tagged, numPorts) : '?'; tr.appendChild(td);
     td = document.createElement('td');
-    td.textContent = portsToRange(untag, numPorts); tr.appendChild(td);
+    td.textContent = s ? portsToRange(untag, numPorts) : '?'; tr.appendChild(td);
     td = document.createElement('td');
-    td.textContent = portsToRange(pvid, numPorts); tr.appendChild(td);
+    td.textContent = s ? portsToRange(pvid, numPorts) : '?'; tr.appendChild(td);
     td = document.createElement('td');
     if (v.id !== 1) {
       btn = document.createElement('button');
@@ -2077,50 +2118,57 @@ async function loadVlanTable() {
       td.appendChild(btn);
     }
     tr.appendChild(td);
-    tbody.appendChild(tr);
+    frag.appendChild(tr);
   }
+  if (gen !== vlanTableGen) return;
+  tbody.innerHTML = '';
+  tbody.appendChild(frag);
 }
 
 function deleteVlan(id) {
   if (!confirm(t('vlan_delete_confirm') + id + '?')) return;
-  fetch('/cmd', { method: 'POST', body: 'vlan ' + id + ' d' })
+  qfetch('/cmd', { method: 'POST', body: 'vlan ' + id + ' d' })
     .then(function() { refreshVlanViews(); })
     .catch(function(err) { console.error('Delete failed:', err); });
 }
 
-function refreshVlanViews() {
-  loadVlanList();
-  loadVlanTable();
+async function refreshVlanViews() {
+  var sel = document.getElementById('vlanSelect');
+  var resp;
+  try { resp = await qfetch('/vlanlist'); } catch(e) { return; }
+  if (resp.status === 401) {
+    document.location = "/login.html";
+    return;
+  }
+  if (!resp.ok) {
+    if (sel) sel.style.display = 'none';
+    return;
+  }
+  var vlans = (await resp.json()).vlan || [];
+  fillVlanList(vlans);
+  await loadVlanTable(vlans);
 }
 
-function loadVlanList() {
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState !== 4) return;
-    var sel = document.getElementById('vlanSelect');
-    if (this.status !== 200) {
-      sel.style.display = 'none';
-      return;
-    }
-    var vlans = JSON.parse(this.responseText).vlan || [];
-    if (!vlans.length) {
-      sel.style.display = 'none';
-      return;
-    }
-    sel.options.length = 1;
-    for (var i = 0; i < vlans.length; i++) {
-      var opt = document.createElement('option');
-      opt.value = vlans[i].id;
-      opt.text = vlans[i].name ? vlans[i].id + ' — ' + vlans[i].name : String(vlans[i].id);
-      sel.appendChild(opt);
-    }
-  };
-  xhttp.open('GET', '/vlanlist', true);
-  sendXHTTP(xhttp);
+function fillVlanList(vlans) {
+  var sel = document.getElementById('vlanSelect');
+  if (!sel) return;
+  if (!vlans.length) {
+    sel.style.display = 'none';
+    return;
+  }
+  sel.style.display = '';
+  sel.options.length = 1;
+  for (var i = 0; i < vlans.length; i++) {
+    var opt = document.createElement('option');
+    opt.value = vlans[i].id;
+    opt.text = vlans[i].name ? vlans[i].id + ' — ' + vlans[i].name : String(vlans[i].id);
+    sel.appendChild(opt);
+  }
 }
 
 sectionInits.vlan = function() {
-  update( () => {
+  update( async () => {
+    await warmPortSvgs();
     vlanForm();
     refreshVlanViews();
     document.getElementById('vlanSelect').onchange = function() {
@@ -2155,7 +2203,7 @@ async function vlanSub() {
   }
   try {
     for (let c of commands) {
-      const response = await fetch('/cmd', {
+      const response = await qfetch('/cmd', {
         method: 'POST',
         body: c
       });
@@ -2210,12 +2258,7 @@ function lagForm() {
       inp.type = "checkbox"; inp.setAttribute("class","psel");
       inp.id = "p_" + lag + "_" + i;
       inp.addEventListener("change", () => { lagDirty[j] = true; });
-      const o = document.createElement("img");
-      if (pIsSFP[i - 1]) {
-        o.src = "sfp.svg"; o.width ="60"; o.height ="60";
-      } else {
-        o.src = "port.svg"; o.width = "40"; o.height = "40";
-      }
+      const o = pIsSFP[i - 1] ? svgIcon("sfp.svg", 60) : svgIcon("port.svg", 40);
       l.appendChild(inp); l.appendChild(o);
       d.appendChild(l)
       m.appendChild(d);
@@ -2280,18 +2323,18 @@ async function lagSub(l) {
   if (lacpMode)
     cmd = cmd + " lacp";
   else if (lacpCfg[l])
-    await fetch('/cmd', { method: 'POST', body: "lag " + (l + 1) + " lacp off" })
+    await qfetch('/cmd', { method: 'POST', body: "lag " + (l + 1) + " lacp off" })
       .catch(err => console.error(`Error: ${err}`));
   for (let i = 1; i <= numPorts; i++) {
     if (document.getElementById("p_mLAG"+l+"_"+i).checked)
       cmd = cmd + ` ${i}`;
   }
   try {
-    await fetch('/cmd', { method: 'POST', body: cmd });
+    await qfetch('/cmd', { method: 'POST', body: cmd });
     const sel = document.getElementById("hsel" + l);
     if (sel.value !== "c") {
       const hcmd = "laghash " + (l + 1) + " " + HASH_PRESETS[Number(sel.value)].kw;
-      await fetch('/cmd', { method: 'POST', body: hcmd });
+      await qfetch('/cmd', { method: 'POST', body: hcmd });
       console.log('Completed!', cmd, '/', hcmd);
     } else {
       console.log('Completed!', cmd, '(hash unchanged)');
@@ -2358,7 +2401,7 @@ function lldpTab(evt, id) {
 
 async function lldpCmd(cmd) {
   lldpDirty = true;
-  try { await fetch('/cmd', { method: 'POST', body: cmd }); }
+  try { await qfetch('/cmd', { method: 'POST', body: cmd }); }
   catch(err) { console.error(`Error: ${err}`); }
   lldpDirty = false;
   fetchLldp();
@@ -2481,12 +2524,7 @@ function mirrorForm() {
       const inp = document.createElement("input");
       inp.type = "checkbox"; inp.setAttribute("class","psel");
       inp.id = mirrors[j] + i;
-      const o = document.createElement("img");
-      if (pIsSFP[i - 1]) {
-        o.src = "sfp.svg"; o.width ="60"; o.height ="60";
-      } else {
-        o.src = "port.svg"; o.width = "40"; o.height = "40";
-      }
+      const o = pIsSFP[i - 1] ? svgIcon("sfp.svg", 60) : svgIcon("port.svg", 40);
       l.appendChild(inp); l.appendChild(o);
       d.appendChild(l)
       m.appendChild(d);
@@ -2550,7 +2588,7 @@ async function mirrorSub() {
     return;
   }
   try {
-    const response = await fetch('/cmd', {
+    const response = await qfetch('/cmd', {
       method: 'POST',
       body: cmd
     });
@@ -2562,7 +2600,7 @@ async function mirrorSub() {
 async function mirrorDel() {
   var cmd = "mirror off";
 try {
-    const response = await fetch('/cmd', {
+    const response = await qfetch('/cmd', {
       method: 'POST',
       body: cmd
     });
@@ -2633,7 +2671,7 @@ async function eeeSub(port, enable) {
     cmd = cmd + "off";
   console.log("eeeSub port " + port, ", value " + enable);
   try {
-    const response = await fetch('/cmd', {
+    const response = await qfetch('/cmd', {
       method: 'POST',
       body: cmd
     });
@@ -2707,7 +2745,7 @@ async function doCMD(cmd)
 {
   console.log("Sending >" + cmd + "<");
   try {
-    const response = await fetch('/cmd', {
+    const response = await qfetch('/cmd', {
       method: 'POST',
       body: cmd
     });
@@ -2796,7 +2834,7 @@ var stpRows = 0;
 async function stpCmd(cmd) {
   stpDirty = true;
   try {
-    await fetch('/cmd', { method: 'POST', body: cmd });
+    await qfetch('/cmd', { method: 'POST', body: cmd });
   } catch(err) {
     console.error(`Error: ${err}`);
   }
@@ -2975,7 +3013,7 @@ sectionInits.stp = function() {
 
 document.addEventListener("DOMContentLoaded", function () {
     if (!document.getElementById('infoTable')) return;
-    fetch('/information.json')
+    qfetch('/information.json')
         .then(response => response.json())
         .then(data => {
             const tableBody = document.getElementById('infoTable').querySelector('tbody');
@@ -3002,10 +3040,11 @@ function walkL2(onDone)
   var entries = [];
   var idx = 0;
   var tries = 0;
+  var gen = l2WalkGen;
 
   function retry() {
     if (++tries < 3) {
-      setTimeout(page, 1000);
+      setTimeout(function() { if (gen === l2WalkGen) page(); }, 1000);
       return;
     }
     onDone(entries, false);
@@ -3050,7 +3089,7 @@ function walkL2(onDone)
         return;
       }
       idx = s[s.length - 1].idx + 1;
-      setTimeout(page, 1000);
+      setTimeout(function() { if (gen === l2WalkGen) page(); }, 1000);
     };
     xhttp.open("GET", "/l2.json?idx=" + idx, true);
     xhttp.timeout = 1500;
