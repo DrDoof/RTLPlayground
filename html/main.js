@@ -961,7 +961,7 @@ window.addEventListener('hashchange', function() {
 });
 
 var svgWarm = null;
-var svgNode = {};
+var svgData = {};
 
 function warmPortSvgs() {
   if (svgWarm) return svgWarm;
@@ -969,11 +969,8 @@ function warmPortSvgs() {
     return qfetch(u)
       .then(function(r) { return r.ok ? r.text() : null; })
       .then(function(txt) {
-        if (!txt) return;
-        var doc = new DOMParser().parseFromString(txt, 'image/svg+xml');
-        var el = doc.documentElement;
-        if (el && el.nodeName.toLowerCase() === 'svg')
-          svgNode[u] = el;
+        if (txt)
+          svgData[u] = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(txt);
       })
       .catch(function() {});
   }));
@@ -981,15 +978,10 @@ function warmPortSvgs() {
 }
 
 function svgIcon(u, size) {
-  var el;
-  if (svgNode[u]) {
-    el = document.importNode(svgNode[u], true);
-  } else {
-    el = document.createElement('img');
-    el.src = u;
-  }
-  el.setAttribute('width', size);
-  el.setAttribute('height', size);
+  var el = document.createElement('img');
+  el.src = svgData[u] || u;
+  el.width = size;
+  el.height = size;
   return el;
 }
 
