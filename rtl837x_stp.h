@@ -49,6 +49,7 @@ extern __xdata uint16_t stp_bpdu_age[10];
 extern __xdata struct bridge root_bridge;
 extern __xdata uint32_t root_bridge_cost;
 extern __xdata uint8_t  stp_root_port;
+extern __xdata uint16_t stp_alt;
 extern __xdata uint16_t stp_tc_count;
 
 #endif

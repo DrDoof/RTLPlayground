@@ -671,7 +671,7 @@ void send_lldp(void)
  * Bridge config (prio index 0-15, hello/maxage/fwd seconds, rstp flag, tx
  * hold), elected root (priority byte + MAC), our path cost, root port, TC
  * counter, and per port: physical number, live ASIC state (2-bit MSTP field:
- * 0 Dis 1 Blk 2 Lrn 3 Fwd), an approximated role, and the per-port config
+ * 0 Dis 1 Blk 2 Lrn 3 Fwd), the port role, and the per-port config
  * (enabled, edge admin/auto/oper, cost/1000, prio, guard, filter, tripped). */
 __xdata uint8_t stp_we_root;
 
@@ -730,10 +730,10 @@ void send_stp(void)
 			itoa_html(0);
 		else if (i == stp_root_port)
 			itoa_html(1);
-		else if (st == 3)
-			itoa_html(2);
-		else
+		else if ((stp_alt >> i) & 1)
 			itoa_html(3);
+		else
+			itoa_html(2);
 		slen += strtox(outbuf + slen, ",\"f\":");
 		itoa_html(stp_pflags[i]);
 		slen += strtox(outbuf + slen, ",\"pc\":\"");
