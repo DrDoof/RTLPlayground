@@ -56,8 +56,16 @@ __xdata uint8_t  stp_pp2p[10];		/* admin point-to-point: 0 auto, 1 on, 2 off */
  * whether they are still current.
  */
 __xdata struct bridge stp_dbridge[10];
+__xdata struct bridge stp_droot[10];
 __xdata uint16_t stp_dpid[10];
 __xdata uint32_t stp_dcost[10];
+__xdata uint16_t stp_alt;		/* bit per port: blocked, a better bridge owns the segment */
+__xdata struct bridge stp_self;		/* our own bridge id, built for comparisons */
+__xdata uint8_t  stp_j;			/* port index of the role selection */
+__xdata uint8_t  stp_best;
+__xdata uint32_t stp_cost_cand;
+__xdata uint32_t stp_cost_best;
+__xdata int8_t   stp_cmp;
 
 /* ---- Status / runtime ---- */
 __xdata struct bridge root_bridge;
@@ -182,7 +190,7 @@ static void print_bridge_id(uint8_t prio, uint8_t ext, __xdata uint8_t *mac) __r
  * formatter. The state indices are the ASIC's own two bits, in the order
  * stp_state_set() writes them. */
 static __code const char stp_state_txt[] = "off  blocklearnfwd  ";
-static __code const char stp_role_txt[]  = "desgroot";
+static __code const char stp_role_txt[]  = "desgrootaltn";
 static __code const char stp_edge_txt[]  = "no  yes ";
 
 static void print_field(__code const char *txt, uint8_t idx, uint8_t width) __reentrant
@@ -224,7 +232,7 @@ static void stp_status(void)
 		print_string("  ");
 		print_field(stp_state_txt, (sfr_data[3 - (stp_i >> 2)] >> ((stp_i << 1) & 0x7)) & 0x3, 5);
 		write_char(' ');
-		print_field(stp_role_txt, stp_i == stp_root_port ? 1 : 0, 4);
+		print_field(stp_role_txt, stp_i == stp_root_port ? 1 : ((stp_alt >> stp_i) & 1 ? 2 : 0), 4);
 		write_char(' ');
 		print_field(stp_edge_txt, stp_pflags[stp_i] & STP_PF_OPEREDGE ? 1 : 0, 4);
 		write_char(' ');
@@ -242,6 +250,9 @@ static void stp_record_designated(uint8_t port) __reentrant
 	stp_dbridge[port].prio = STP_I->bridge.prio;
 	stp_dbridge[port].ext = STP_I->bridge.ext;
 	memcpy(stp_dbridge[port].mac, STP_I->bridge.mac, 6);
+	stp_droot[port].prio = STP_I->root.prio;
+	stp_droot[port].ext = STP_I->root.ext;
+	memcpy(stp_droot[port].mac, STP_I->root.mac, 6);
 	stp_dpid[port] = ((uint16_t)STP_I->port_prio << 8) | STP_I->port_id;
 	stp_cost_scratch = STP_I->root_path_cost;
 	stp_dcost[port] = ((stp_cost_scratch & 0xff) << 24)
@@ -324,6 +335,97 @@ static void stp_claim_root(void)
 	root_bridge_cost = 0;
 	stp_root_port = 0xff;
 	stp_msg_age = 0;
+}
+
+
+/* Information a port heard is only usable while it is younger than max age. */
+static uint8_t stp_info_fresh(uint8_t port) __reentrant
+{
+	if (!((stp_heard >> port) & 1))
+		return 0;
+	return stp_bpdu_age[port] <= (uint16_t)stp_maxage_s * STP_HZ;
+}
+
+
+/* Compare what a port heard against what this bridge would announce there:
+ * root id, root path cost, bridge id, port id, in that order (802.1D 17.6).
+ * Negative means the other bridge owns the segment and we must not forward.
+ */
+static int8_t stp_cmp_designated(uint8_t port) __reentrant
+{
+	stp_cmp = cmpBytes((__xdata uint8_t *)&stp_droot[port], (__xdata uint8_t *)&root_bridge, 8);
+	if (stp_cmp)
+		return stp_cmp;
+	if (stp_dcost[port] != root_bridge_cost)
+		return stp_dcost[port] < root_bridge_cost ? -1 : 1;
+	stp_self.prio = stp_prio;
+	stp_self.ext = 0x00;
+	memcpy(stp_self.mac, uip_ethaddr.addr, 6);
+	stp_cmp = cmpBytes((__xdata uint8_t *)&stp_dbridge[port], (__xdata uint8_t *)&stp_self, 8);
+	if (stp_cmp)
+		return stp_cmp;
+	if (stp_dpid[port] == (((uint16_t)stp_pprio[port] << 8) | (port + 1)))
+		return 0;
+	return stp_dpid[port] < (((uint16_t)stp_pprio[port] << 8) | (port + 1)) ? -1 : 1;
+}
+
+
+/* Pick the port that reaches the root most cheaply and block the ports where
+ * a better bridge is already the designated one. Without the second half a
+ * ring through this switch stays closed whenever the neighbours have no
+ * reason to block their own side.
+ */
+static void stp_reselect(void)
+{
+	stp_best = 0xff;
+	for (stp_j = machine.min_port; stp_j <= machine.max_port; stp_j++) {
+		if (!(stp_pflags[stp_j] & STP_PF_ENABLED) || !stp_info_fresh(stp_j))
+			continue;
+		if (cmpBytes((__xdata uint8_t *)&stp_droot[stp_j], (__xdata uint8_t *)&root_bridge, 8))
+			continue;
+		stp_cost_cand = stp_dcost[stp_j] + PCOST(stp_j);
+		if (stp_best != 0xff) {
+			if (stp_cost_cand > stp_cost_best)
+				continue;
+			if (stp_cost_cand == stp_cost_best
+			    && cmpBytes((__xdata uint8_t *)&stp_dbridge[stp_j],
+					(__xdata uint8_t *)&stp_dbridge[stp_best], 8) >= 0)
+				continue;
+		}
+		stp_best = stp_j;
+		stp_cost_best = stp_cost_cand;
+	}
+
+	if (stp_best != 0xff) {
+		if (stp_root_port != stp_best) {
+			stp_root_port = stp_best;
+			stp_tc_count++;
+		}
+		root_bridge_cost = stp_cost_best;
+	}
+
+	for (stp_j = machine.min_port; stp_j <= machine.max_port; stp_j++) {
+		if (!(stp_pflags[stp_j] & STP_PF_ENABLED))
+			continue;
+		if (stp_j != stp_root_port && stp_info_fresh(stp_j)
+		    && stp_cmp_designated(stp_j) < 0) {
+			if ((stp_alt >> stp_j) & 1)
+				continue;
+			stp_alt |= (uint16_t)1 << stp_j;
+			stp_pflags[stp_j] &= ~STP_PF_OPEREDGE;
+			port_timers[stp_j] = 0;
+			stp_state_set(stp_j, 0b01);
+			print_string("STP: better bridge on the segment, blocking port ");
+			print_port_nl(stp_j);
+			continue;
+		}
+		if (!((stp_alt >> stp_j) & 1))
+			continue;
+		stp_alt &= ~((uint16_t)1 << stp_j);
+		port_timers[stp_j] = (uint16_t)stp_fwddelay_s * STP_HZ;
+		print_string("STP: port released, listening ");
+		print_port_nl(stp_j);
+	}
 }
 
 
@@ -550,6 +652,8 @@ void stp_in(void) __banked
 		stp_tc_count++;
 	}
 
+	stp_reselect();
+
 	/* Refresh our cost to the root when the update comes in on the root port */
 	if (port == stp_root_port) {
 		/* Age of the information we now hold (see the TX note on the wire
@@ -594,6 +698,7 @@ void stp_timers(void) __banked
 				} else {
 					port_timers[stp_i] = 0;
 					stp_heard &= ~((uint16_t)1 << stp_i);
+					stp_alt &= ~((uint16_t)1 << stp_i);
 					print_string("STP: link down, port blocking ");
 					print_port_nl(stp_i);
 					stp_topology_change(stp_i);
@@ -601,6 +706,7 @@ void stp_timers(void) __banked
 			}
 			stp_link_prev = stp_link_now;
 		}
+		stp_reselect();
 	}
 
 	for (stp_i = machine.min_port; stp_i <= machine.max_port; stp_i++) {
@@ -619,7 +725,7 @@ void stp_timers(void) __banked
 			 * where our own root information comes FROM, and echoing it back
 			 * there just feeds the upstream bridge its own data (and looks
 			 * like a competing designated bridge on that segment). */
-			if (stp_i != stp_root_port)
+			if (stp_i != stp_root_port && !((stp_alt >> stp_i) & 1))
 				stp_cnf_send(stp_i);
 		}
 
@@ -683,6 +789,7 @@ void stp_defaults(void) __banked
 		stp_tx_budget[stp_i] = 6;
 	}
 	stp_heard = 0;
+	stp_alt = 0;
 	stp_tc_count = 0;
 	stp_tc_while = 0;
 	stp_claim_root();
