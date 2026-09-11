@@ -5,6 +5,7 @@
 #include "rtl837x_regs.h"
 #include "cmd_parser.h"
 #include "rtl837x_flash.h"
+#include "rtl837x_sfr.h"
 #include "uip.h"
 #include "html_data.h"
 
@@ -467,6 +468,35 @@ __xdata struct {
 	uint16_t plen;
 } upload_settings;
 
+static __xdata uint8_t blank_head[4];
+
+static uint8_t flash_sector_blank(void)
+{
+	__xdata uint32_t start = flash_region.addr;
+	uint8_t hi, lo;
+
+	flash_region.len = 4;
+	flash_read_bulk(blank_head);
+	flash_region.addr = start;
+	if ((blank_head[0] & blank_head[1] & blank_head[2] & blank_head[3]) != 0xff)
+		return 0;
+	hi = (uint8_t)(start >> 8);
+	lo = 4;
+	do {
+		SFR_FLASH_ADDR8 = hi;
+		SFR_FLASH_ADDR0 = lo;
+		SFR_FLASH_TCONF = 4;
+		SFR_FLASH_EXEC_GO = 1;
+		while (SFR_FLASH_EXEC_BUSY);
+		if ((SFR_FLASH_DATA0 & SFR_FLASH_DATA8 & SFR_FLASH_DATA16 & SFR_FLASH_DATA24) != 0xff)
+			return 0;
+		lo += 4;
+		if (!lo)
+			hi++;
+	} while (lo || (hi & 0x0f));
+	return 1;
+}
+
 /*
  * Reads post data from the http stream and writes it into flash memory
  * Input: upload_settings, set by the caller
@@ -566,7 +596,8 @@ uint8_t stream_upload(void)
 				dbg_string("CRC16: "); dbg_short(crc_value); dbg_char('\n');
 				if (uptr % FLASH_SECTOR_SIZE == 0) {
 					flash_region.addr = uptr;
-					flash_sector_erase();
+					if (!flash_sector_blank())
+						flash_sector_erase();
 				}
 				flash_region.addr = uptr;
 				flash_region.len = FLASH_PAGE_SIZE;
