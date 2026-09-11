@@ -90,6 +90,12 @@ __xdata uint32_t last_session_use;
 extern __xdata uint16_t crc_value;
 __xdata uint16_t crc_final;
 void crc16_bank1(__xdata uint8_t *v) __naked;
+uint8_t crc16_copy(void) __naked;
+extern __xdata uint8_t crc_ptr_h;
+extern __xdata uint8_t crc_ptr_l;
+extern __xdata uint8_t crc_dst_h;
+extern __xdata uint8_t crc_dst_l;
+extern __xdata uint8_t crc_cnt;
 
 
 inline uint8_t is_separator(uint8_t c)
@@ -473,6 +479,8 @@ uint8_t stream_upload(void)
 	dbg_string("Stream_upload called: ");
 	dbg_short(upload_settings.bptr); dbg_char('\n');
 
+	__xdata uint8_t * __xdata src = upload_settings.p;
+
 	do {
 		if (upload_settings.bptr >= upload_settings.plen) {
 			s->tstate = TSTATE_POST;
@@ -515,10 +523,34 @@ uint8_t stream_upload(void)
 				return 0;
 			return 1;
 		}
-		if (upload_settings.p[upload_settings.bptr] == boundary[bindex]) {
+		if (!bindex) {
+			__xdata uint8_t run;
+			__xdata uint16_t space = FLASH_PAGE_SIZE - write_len;
+			__xdata uint16_t avail = upload_settings.plen - upload_settings.bptr;
+			__xdata uint8_t *q = src + upload_settings.bptr;
+			__xdata uint8_t *d = flash_buf + write_len;
+			if (space)
+				space--;
+			if (avail > space)
+				avail = space;
+			if (avail > 255)
+				avail = 255;
+			crc_ptr_h = (uint8_t)(((uint16_t)q) >> 8);
+			crc_ptr_l = (uint8_t)((uint16_t)q);
+			crc_dst_h = (uint8_t)(((uint16_t)d) >> 8);
+			crc_dst_l = (uint8_t)((uint16_t)d);
+			crc_cnt = (uint8_t)avail;
+			run = crc16_copy();
+			if (run) {
+				write_len += run;
+				upload_settings.bptr += run;
+				continue;
+			}
+		}
+		if (src[upload_settings.bptr] == boundary[bindex]) {
 			if (!bindex)
 				crc_final = crc_value;
-			crc16_bank1(upload_settings.p + upload_settings.bptr);
+			crc16_bank1(src + upload_settings.bptr);
 			upload_settings.bptr++;
 			bindex++;
 		} else {
@@ -527,8 +559,8 @@ uint8_t stream_upload(void)
 				write_len += bindex;
 				bindex = 0;
 			}
-			crc16_bank1(upload_settings.p + upload_settings.bptr);
-			flash_buf[write_len++] = upload_settings.p[upload_settings.bptr++];
+			crc16_bank1(src + upload_settings.bptr);
+			flash_buf[write_len++] = src[upload_settings.bptr++];
 			if (write_len >= FLASH_PAGE_SIZE) {
 				dbg_string("len: "); dbg_short(write_len); dbg_char(' ');
 				dbg_string("CRC16: "); dbg_short(crc_value); dbg_char('\n');

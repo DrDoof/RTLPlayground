@@ -35,6 +35,7 @@ extern __xdata uint32_t flash_size;
 extern __xdata uint16_t crc_value;
 __xdata struct machine_runtime machine_detected;
 void crc16_bank1(__xdata uint8_t *v) __naked;
+void crc16_init(void) __naked;
 void flash_default_config(void);
 void early_boot_handle_button(void);
 
@@ -2257,6 +2258,7 @@ void main(void)
 	// See this issue: https://github.com/logicog/RTLPlayground/issues/70
 	print_string("\nInitializing Flash controller\n");
 	flash_init(1);
+	crc16_init();
 
 	// Set default for SFP pins so we can start up a module already inserted
 	sfp_pins_last = 0x33; // signal LOS and no module inserted (for both slots, even if only 1 present)
