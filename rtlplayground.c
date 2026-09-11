@@ -1562,12 +1562,16 @@ void handle_button(void)
 	}
 }
 
+__xdata uint8_t idle_tick;
+
 //
-// An idle function that sleeps for 1 tick and does all the house-keeping
+// An idle function that sleeps until the next tick, unless a tick already passed, and does all the house-keeping
 //
 void idle(void)
 {
-	PCON |= 1;
+	if ((uint8_t)ticks == idle_tick)
+		PCON |= 1;
+	idle_tick = (uint8_t)ticks;
 	health_loop_start();
 	if (sec_counter >= SYS_TICK_HZ) {
 		sec_counter -= SYS_TICK_HZ;
