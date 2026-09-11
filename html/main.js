@@ -759,6 +759,7 @@ function update(callback) {
 	let ttid = "tt_" + n;
 	n--;
 	txG[n] = BigInt(p.txG); txB[n] = BigInt(p.txB); rxG[n] = BigInt(p.rxG); rxB[n] = BigInt(p.rxB);
+	pState[n] = p.enabled == 0 ? -1 : p.link;
 	var psvg = document.getElementById(pid);
 	var tt = document.getElementById(ttid);
 	if (psvg == null || !psvg.contentDocument)
