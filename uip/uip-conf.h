@@ -131,6 +131,7 @@ typedef unsigned short uip_stats_t;
  * \hideinitializer
  */
 #define UIP_CONF_BUFFER_SIZE     1556
+#define UIP_CONF_RECEIVE_WINDOW  (2 * UIP_TCP_MSS)
 
 /**
  * Bytes of the buffer kept out of the advertised MSS.
