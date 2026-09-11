@@ -22,7 +22,6 @@
 #define LEDS_TWO_PAIR_2G5	0x80000
 
 #include <stdint.h>
-void leds_dump(void) __banked;
 void leds_setup(void) __banked;
 
 #endif

@@ -2336,8 +2336,6 @@ void main(void)
 	leds_setup();
 	machine_custom_init();
 
-	leds_dump();
-
 	set_sys_led_state(SYS_LED_SLOW);
 
 	if (machine_detected.isRTL8373)
