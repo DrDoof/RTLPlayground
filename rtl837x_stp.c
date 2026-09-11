@@ -70,6 +70,7 @@ __xdata uint16_t port_timers[10];	/* listen-period countdown (0 = not listening)
 __xdata uint16_t port_hello[10];	/* hello TX countdown */
 __xdata uint16_t stp_bpdu_age[10];	/* ticks since last BPDU seen on port (saturating) */
 __xdata uint8_t  stp_loop_held[10];	/* port is out of forwarding because a loop was seen on it */
+__xdata uint16_t stp_heard;		/* bit per port: a BPDU arrived since the link last went down */
 __xdata uint8_t  stp_tx_budget[10];	/* tx hold: BPDUs left in the current second */
 __xdata uint8_t  stp_tx_count[10];	/* BPDUs actually put on the wire, wraps at 256 */
 __xdata uint16_t stp_sec_tick;		/* 1 s window for the tx budget */
@@ -461,6 +462,7 @@ void stp_in(void) __banked
 	 * exempts edge ports and so would go on skipping the counter and the
 	 * L2 flush for a port that has a bridge behind it. */
 	stp_pflags[port] &= ~STP_PF_OPEREDGE;
+	stp_heard |= (uint16_t)1 << port;
 
 	if (STP_I->bpdu_type == BPDU_TYPE_TCN) {
 		stp_tx_flags_extra = BPDU_FLAG_TCACK;
@@ -591,6 +593,7 @@ void stp_timers(void) __banked
 					stp_bpdu_age[stp_i] = 0;
 				} else {
 					port_timers[stp_i] = 0;
+					stp_heard &= ~((uint16_t)1 << stp_i);
 					print_string("STP: link down, port blocking ");
 					print_port_nl(stp_i);
 					stp_topology_change(stp_i);
@@ -632,6 +635,7 @@ void stp_timers(void) __banked
 				stp_topology_change(stp_i);
 			} else if ((stp_pflags[stp_i] & STP_PF_AUTOEDGE)
 			           && !stp_loop_held[stp_i]
+			           && !((stp_heard >> stp_i) & 1)
 			           && stp_bpdu_age[stp_i] > STP_EDGE_DELAY) {
 				/* Auto edge: nothing talks (R)STP on this port - it is
 				 * host-facing, go to forwarding without the full wait. */
@@ -678,6 +682,7 @@ void stp_defaults(void) __banked
 		port_hello[stp_i] = 0;
 		stp_tx_budget[stp_i] = 6;
 	}
+	stp_heard = 0;
 	stp_tc_count = 0;
 	stp_tc_while = 0;
 	stp_claim_root();
