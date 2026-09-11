@@ -379,6 +379,34 @@ static void scen_we_are_better(void)
 	check_state(0, 3, "port 1 keeps forwarding");
 }
 
+static void scen_alt_survives_link_bounce(void)
+{
+	printf("7. a blocked port stays blocked when the carrier returns\n");
+	scen_ring();
+	struct sim_bpdu from_root = { .port = 8, .root_prio = 0x40, .root_cost = 0,
+				      .br_prio = 0x40, .port_id = 2 };
+	memcpy(from_root.root_mac, ROOT_MAC, 6);
+	memcpy(from_root.br_mac, ROOT_MAC, 6);
+	struct sim_bpdu from_peer = { .port = 0, .root_prio = 0x40, .root_cost = 2000,
+				      .br_prio = 0x80, .port_id = 1 };
+	memcpy(from_peer.root_mac, ROOT_MAC, 6);
+	memcpy(from_peer.br_mac, PEER_MAC, 6);
+
+	/* The peer sends before the once-a-second carrier poll notices the link,
+	 * which is what put the port back on the listen timer on real hardware. */
+	links_set(1 << 8);
+	secs(2);
+	links_set((1 << 0) | (1 << 8));
+	bpdu_in(&from_peer);
+	for (int i = 0; i < 15; i++) {
+		bpdu_in(&from_root);
+		bpdu_in(&from_peer);
+		secs(2);
+	}
+	check_state(0, 1, "port 1 never reaches forwarding while the peer is better");
+	check(stp_root_port == 8, "the uplink is still the root port");
+}
+
 int main(int argc, char **argv)
 {
 	verbose = argc > 1 && argv[1][0] == '-' ? (argv[1][1] == 'd' ? 2 : 1) : 0;
@@ -388,6 +416,7 @@ int main(int argc, char **argv)
 	scen_ring_clears();
 	scen_cheaper_path();
 	scen_we_are_better();
+	scen_alt_survives_link_bounce();
 	if (failures) {
 		printf("\n%d check(s) failed\n", failures);
 		return 1;

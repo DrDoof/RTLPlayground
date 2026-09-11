@@ -409,14 +409,14 @@ static void stp_reselect(void)
 			continue;
 		if (stp_j != stp_root_port && stp_info_fresh(stp_j)
 		    && stp_cmp_designated(stp_j) < 0) {
-			if ((stp_alt >> stp_j) & 1)
-				continue;
-			stp_alt |= (uint16_t)1 << stp_j;
 			stp_pflags[stp_j] &= ~STP_PF_OPEREDGE;
 			port_timers[stp_j] = 0;
 			stp_state_set(stp_j, 0b01);
-			print_string("STP: better bridge on the segment, blocking port ");
-			print_port_nl(stp_j);
+			if (!((stp_alt >> stp_j) & 1)) {
+				stp_alt |= (uint16_t)1 << stp_j;
+				print_string("STP: better bridge on the segment, blocking port ");
+				print_port_nl(stp_j);
+			}
 			continue;
 		}
 		if (!((stp_alt >> stp_j) & 1))
@@ -694,6 +694,7 @@ void stp_timers(void) __banked
 					 * rewired while we were down. Auto edge still applies. */
 					port_timers[stp_i] = (uint16_t)stp_fwddelay_s * STP_HZ;
 					stp_pflags[stp_i] &= ~STP_PF_OPEREDGE;
+					stp_alt &= ~((uint16_t)1 << stp_i);
 					stp_bpdu_age[stp_i] = 0;
 				} else {
 					port_timers[stp_i] = 0;
@@ -732,6 +733,9 @@ void stp_timers(void) __banked
 		/* Promote a port out of blocking once its listen period expires
 		 * with no reason to stay blocked (no better root heard: we are
 		 * the designated bridge on that port). */
+		if (port_timers[stp_i] && ((stp_alt >> stp_i) & 1))
+			port_timers[stp_i] = 0;
+
 		if (port_timers[stp_i]) {
 			if (!--port_timers[stp_i]) {
 				stp_loop_held[stp_i] = 0;
