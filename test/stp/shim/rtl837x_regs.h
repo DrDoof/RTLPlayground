@@ -36,3 +36,5 @@ void hw_reg_write(uint16_t reg, uint8_t v24, uint8_t v16, uint8_t v8, uint8_t v0
 
 #define RTL837X_REG_LINKS_STS	0x63E8
 #define RTL837X_MSTP_STATES	0x5310
+#define RTL837X_REG_LINKS	0x63f0
+#define RTL837X_REG_LINKS_89	0x63f4

@@ -50,6 +50,7 @@ __xdata uint8_t  stp_txhold;		/* BPDUs per port per second */
 __xdata uint8_t  stp_pflags[10];
 __xdata uint32_t stp_pcost[10];		/* 0 = auto */
 __xdata uint8_t  stp_pprio[10];
+__xdata uint8_t  stp_pspeed[10];	/* speed nibble last read from the ASIC */
 __xdata uint8_t  stp_pp2p[10];		/* admin point-to-point: 0 auto, 1 on, 2 off */
 
 /* Designated bridge, port and cost last heard on the port; stp_bpdu_age tells
@@ -96,8 +97,15 @@ __xdata uint8_t  stp_loop_peer;		/* the other own port seen on a looped segment 
 
 #define STP_EDGE_DELAY	(3 * STP_HZ)	/* auto-edge: forward after 3 s without BPDU */
 
-#define AUTO_COST	20000UL		/* path cost used when stp_pcost == 0 (1G default) */
-#define PCOST(i)	(stp_pcost[i] ? stp_pcost[i] : AUTO_COST)
+#define AUTO_COST	20000UL		/* path cost of a link whose speed we cannot read */
+#define PCOST(i)	(stp_pcost[i] ? stp_pcost[i] : stp_speed_cost[stp_pspeed[i] & 0x7])
+
+/* 802.1Q recommended path costs, indexed by the speed nibble the ASIC reports:
+ * 0 10M, 1 100M, 2 1G, 4 10G, 5 2.5G, 6 5G; the rest are unknown to us. */
+static __code const uint32_t stp_speed_cost[8] = {
+	2000000UL, 200000UL, 20000UL, AUTO_COST,
+	2000UL, 8000UL, 4000UL, AUTO_COST
+};
 
 struct stp_pkt {
 	uint8_t stp_addr[6];
@@ -680,6 +688,15 @@ void stp_timers(void) __banked
 		 * of the 50 Hz tick. */
 		reg_read_m(RTL837X_REG_LINKS_STS);
 		stp_link_now = (uint16_t)sfr_data[1] | ((uint16_t)sfr_data[2] << 8);
+		reg_read_m(RTL837X_REG_LINKS);
+		for (stp_i = machine.min_port; stp_i <= machine.max_port; stp_i++) {
+			if (stp_i == 8)
+				reg_read_m(RTL837X_REG_LINKS_89);
+			stp_pspeed[stp_i] = (stp_i & 1)
+				? (sfr_data[3 - ((stp_i & 7) >> 1)] >> 4)
+				: (sfr_data[3 - ((stp_i & 7) >> 1)] & 0xf);
+		}
+
 		if (stp_link_now != stp_link_prev) {
 			for (stp_i = machine.min_port; stp_i <= machine.max_port; stp_i++) {
 				if (!(stp_pflags[stp_i] & STP_PF_ENABLED))

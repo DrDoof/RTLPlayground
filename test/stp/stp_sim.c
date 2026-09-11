@@ -65,6 +65,7 @@ void port_l2_forget_port(uint8_t port) { if (port < NPORTS) flush_count[port]++;
  * written through sfr_data) and the carrier bitmap it polls once a second. */
 static uint8_t mstp_reg[4];
 static uint16_t sim_links;
+static uint8_t sim_speed[NPORTS];	/* nibble as the ASIC reports it: 2 = 1G, 4 = 10G */
 static int tx_frames[NPORTS];
 
 void reg_read_m(uint16_t addr)
@@ -75,6 +76,11 @@ void reg_read_m(uint16_t addr)
 	else if (addr == RTL837X_REG_LINKS_STS) {
 		sfr_data[1] = (uint8_t)sim_links;
 		sfr_data[2] = (uint8_t)(sim_links >> 8);
+	} else if (addr == RTL837X_REG_LINKS || addr == RTL837X_REG_LINKS_89) {
+		uint8_t base = (addr == RTL837X_REG_LINKS) ? 0 : 8;
+		for (uint8_t k = 0; k < 8 && base + k < NPORTS; k++)
+			sfr_data[3 - (k >> 1)] |= (k & 1) ? (uint8_t)(sim_speed[base + k] << 4)
+							  : sim_speed[base + k];
 	}
 }
 
@@ -234,6 +240,8 @@ static void reset_all(void)
 	memset(mstp_reg, 0, sizeof(mstp_reg));
 	memset(flush_count, 0, sizeof(flush_count));
 	memset(tx_frames, 0, sizeof(tx_frames));
+	for (uint8_t p = 0; p < NPORTS; p++)
+		sim_speed[p] = 2;	/* 1G unless a scenario says otherwise */
 	stp_enabled = 1;
 	stp_defaults();
 	links_set(0);
@@ -407,6 +415,30 @@ static void scen_alt_survives_link_bounce(void)
 	check(stp_root_port == 8, "the uplink is still the root port");
 }
 
+static void scen_speed_cost(void)
+{
+	printf("8. the faster of two links to one root wins on cost\n");
+	reset_all();
+	sim_speed[8] = 4;		/* 10G uplink on port 9 */
+	sim_speed[0] = 2;		/* 1G on port 1 */
+	links_set((1 << 0) | (1 << 8));
+	secs(1);
+	struct sim_bpdu from_root = { .port = 8, .root_prio = 0x40, .root_cost = 0,
+				      .br_prio = 0x40, .port_id = 2 };
+	memcpy(from_root.root_mac, ROOT_MAC, 6);
+	memcpy(from_root.br_mac, ROOT_MAC, 6);
+	struct sim_bpdu slow = from_root;
+	slow.port = 0;
+	slow.port_id = 7;
+	for (int i = 0; i < 12; i++) {
+		bpdu_in(&from_root);
+		bpdu_in(&slow);
+		secs(2);
+	}
+	check(stp_root_port == 8, "the 10G port is the root port");
+	check(root_bridge_cost == 2000, "its cost is the 10G value, not a flat default");
+}
+
 int main(int argc, char **argv)
 {
 	verbose = argc > 1 && argv[1][0] == '-' ? (argv[1][1] == 'd' ? 2 : 1) : 0;
@@ -417,6 +449,7 @@ int main(int argc, char **argv)
 	scen_cheaper_path();
 	scen_we_are_better();
 	scen_alt_survives_link_bounce();
+	scen_speed_cost();
 	if (failures) {
 		printf("\n%d check(s) failed\n", failures);
 		return 1;
