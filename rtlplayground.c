@@ -147,6 +147,7 @@ __xdata char sfp_module_serial[2][17];
 __xdata uint8_t sfp_options[2];
 __xdata uint8_t sfp_buf[16];	/* scratch for one I2C transaction, the controller reads at most 16 bytes */
 __xdata uint8_t sfp_speed[2];
+__xdata uint8_t sfp_admin_off;
 __xdata uint8_t sfp_quirks[2];
 __xdata bool button_last;
 __xdata uint8_t button_sec_counter_last;
@@ -1462,6 +1463,8 @@ static bool sfp_module_read(uint8_t sfp)
 void handle_sfp(void)
 {
 	for (uint8_t sfp = 0; sfp < machine.n_sfp; sfp++) {
+		if (sfp_admin_off & (1 << sfp))
+			continue;
 		if (!gpio_pin_test(machine.sfp_port[sfp].pin_detect)) {
 			if (sfp_pins_last & (0x1 << (sfp << 2))) {
 				sfp_pins_last &= ~(0x01 << (sfp << 2));

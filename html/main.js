@@ -1025,6 +1025,7 @@ const conf_cmds = [
   /^ingress\s+[tua]$/,
   /^port\s+\d{1,2}\s+(10m|100m|1g|2g5|5g|10g|auto|on|off)(\s+(half|full))?$/,
   /^port\s+\d{1,2}\s+name\s+\S+$/,
+  /^sfp\s+[12]\s+(auto|100m|1g|2g5|10g|off)$/,
   /^eee(\s+\d{1,2})?\s+(on|off)$/,
   /^mirror(\s+\d{1,2})(\s+\d{1,2}[tr]?)+$/,
   /^lag\s+\d\s+lacp\s+off$/,
@@ -1072,6 +1073,7 @@ const conf_overwrite = [
   /^ingress\b/,
   /^port\s+\d{1,2}(?!\s+name\b)/,
   /^port\s+\d{1,2}\s+name\b/,
+  /^sfp\s+[12]\b/,
   /^eee\s+\d{1,2}\b/,
   /^eee\b/,
   /^mirror\b/,
@@ -1392,6 +1394,14 @@ function createPortTable() {
        + '<option value="10m half">' + t('port_10m_h') + '</option>'
        + '</select>';
       const dSwitch = '<input type="checkbox" id="disable_port" onchange="portOnOff();">'
+      const fSelect = '<select name="sfp_sel" id="sfp_sel">'
+       + '<option value="auto">' + t('port_auto') + '</option>'
+       + '<option value="10g">10G</option>'
+       + '<option value="2g5">' + t('port_2500m') + '</option>'
+       + '<option value="1g">' + t('port_1000m') + '</option>'
+       + '<option value="100m">100M</option>'
+       + '</select>';
+      const fSwitch = '<input type="checkbox" id="disable_sfp" onchange="sfpOnOff(0);">'
      for (let i = 1; i <= numPorts; i++) {
       const tr = tbl.insertRow();
       let td = tr.insertCell(); td.appendChild(document.createTextNode(t('common_port') + i));
@@ -1400,7 +1410,15 @@ function createPortTable() {
       td = tr.insertCell(); td.innerHTML = linkText(pState[i-1] + 1);
       tr.insertCell(); // filled by devRender()
       if (pIsSFP[i-1]) {
-        tr.insertCell(); tr.insertCell(); tr.insertCell();
+        let slot = 0;
+        for (let k = 0; k < i; k++)
+          if (pIsSFP[k]) slot++;
+        td = tr.insertCell(); td.innerHTML = fSelect.replaceAll("sfp_sel", "sfp_sel_" + i);
+        td = tr.insertCell(); td.innerHTML = fSwitch.replaceAll("disable_sfp", "disable_sfp_" + i)
+                                                   .replace("sfpOnOff(0)", "sfpOnOff(" + i + ")");
+        td = tr.insertCell();
+        td.innerHTML = '<button type="button" style="margin: 0 0 0 24px" onclick="applySfp('
+                       + i + ',' + slot + ');">' + t('port_apply') + '</button>';
         continue;
       }
       td = tr.insertCell(); td.innerHTML = sSelect.replaceAll("speed_sel", "speed_sel_" + i);
@@ -1481,6 +1499,23 @@ async function portOnOff(p) {
   var disabled = document.getElementById('disable_port_' + p).checked;
   document.getElementById('speed_sel_' + p).disabled = disabled;
   clicked[p] = 1;
+}
+
+async function sfpOnOff(p) {
+  var off = document.getElementById('disable_sfp_' + p).checked;
+  document.getElementById('sfp_sel_' + p).disabled = off;
+  clicked[p] = 1;
+}
+
+async function applySfp(port, slot) {
+  var off = document.getElementById('disable_sfp_' + port).checked;
+  var cmd = 'sfp ' + slot + ' '
+            + (off ? 'off' : document.getElementById('sfp_sel_' + port).value);
+  try {
+    await qfetch('/cmd', { method: 'POST', body: cmd });
+  } catch(err) {
+    console.error('Error: ', err);
+  }
 }
 
 async function applyMTU(port) {

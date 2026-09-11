@@ -57,6 +57,7 @@ extern __xdata struct uip_eth_addr uip_ethaddr;
 extern __xdata uint16_t len_left;
 extern __xdata uint8_t entry;
 extern __xdata uint8_t sfp_speed[2];
+extern __xdata uint8_t sfp_admin_off;
 extern __xdata uint8_t sfp_pins_last;
 extern __xdata uint8_t sfp_options[2];
 __xdata uint8_t gpio_last_value[8] = { 0 };
@@ -964,6 +965,14 @@ void parse_sfp(void)
 	} else if (cmd_compare(2, "auto")) {
 		print_string(" AUTO\n");
 		sfp_speed[slot] = SFP_SPEED_AUTO;
+	} else if (cmd_compare(2, "off")) {
+		print_string(" OFF\n");
+		sfp_admin_off |= 1 << slot;
+		sds_config_mac(machine.sfp_port[slot].sds, SDS_OFF);
+		return;
+	} else if (cmd_compare(2, "on")) {
+		print_string(" ON\n");
+		sfp_admin_off &= ~(1 << slot);
 	} else {
 		goto err;
 	}
@@ -971,7 +980,7 @@ void parse_sfp(void)
 	handle_sfp();
 	return;
 err:
-	print_string("\nUsage:\n\tsfp\n\tsfp [1|2] [1g|2g5|10g]\n");
+	print_string("\nUsage:\n\tsfp\n\tsfp [1|2] [100m|1g|2g5|10g|auto|on|off]\n");
 }
 
 
