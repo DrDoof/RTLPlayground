@@ -1143,7 +1143,7 @@ void net_appcall(void)
 	if (uip_connected())
 		for (uint8_t i = 0; i < UIP_CONNS; i++)
 			if (&uip_conns[i] != uip_conn && uip_conns[i].lport == HTONS(80) &&
-			    uip_conns[i].tcpstateflags != UIP_CLOSED) {
+			    (uip_conns[i].tcpstateflags & UIP_TS_MASK) == UIP_ESTABLISHED) {
 				uip_abort();
 				return;
 			}
