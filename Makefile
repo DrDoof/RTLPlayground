@@ -80,6 +80,8 @@ create_build_dir: $(SDCC)
 	mkdir -p "$(BUILDDIR)/uip"
 	mkdir -p "$(BUILDDIR)/httpd"
 	mkdir -p "$(BUILDDIR)/machine"
+	mkdir -p "$(BUILDDIR)/crypto"
+	mkdir -p "$(BUILDDIR)/ssh"
 
 # Every machine is a pair machine/<MACHINE>.c + machine/<MACHINE>.h. Selecting
 # them by name means no #if/#elif chain, so an unknown or empty $MACHINE is
@@ -140,6 +142,21 @@ SRCS += \
 	uip/uip-fw.c \
 	uip/uip-neighbor.c \
 	uip/uip-split.c
+
+ifeq ($(SSH),1)
+CC_FLAGS += -DSSH
+SRCS += \
+	crypto/sha256.c \
+	crypto/sha512.c \
+	crypto/poly1305.c \
+	crypto/x25519.c \
+	crypto/ed25519.c \
+	ssh/ssh.c \
+	ssh/ssh_chacha.c \
+	ssh/ssh_port.c
+SSH_LDFLAGS = -Wl-bBANK4=0x44000
+SSH_ASM = $(BUILDDIR)/crypto/chacha_8051.rel $(BUILDDIR)/crypto/fe_mul_8051.rel $(BUILDDIR)/crypto/poly1305_8051.rel
+endif
 
 OBJS = ${SRCS:%.c=$(BUILDDIR)/%.rel}
 DEPS := ${SRCS:%.c=$(BUILDDIR)/%.d}
@@ -216,8 +233,8 @@ $(BUILDDIR)/%.rel: %.asm $(CCFLAGS_STAMP) | create_build_dir
 	${ASM} ${AFLAGS} -o $@ $<
 #	mv -f $(addprefix $(basename $^), .lst .rel .sym) .
 
-$(BUILDDIR)/rtlplayground.ihx: $(OBJS) $(BUILDDIR)/crtbank.rel $(BUILDDIR)/crc16.rel
-	$(CC) $(CC_FLAGS) --xram-size 49151 -Wl-bHOME=0x00000 -Wl-bBANK1=0x14000 -Wl-bBANK2=0x24000 -Wl-bBANK3=0x34000 -Wl-r -o $@ $^
+$(BUILDDIR)/rtlplayground.ihx: $(OBJS) $(BUILDDIR)/crtbank.rel $(BUILDDIR)/crc16.rel $(SSH_ASM)
+	$(CC) $(CC_FLAGS) --xram-size 49151 -Wl-bHOME=0x00000 -Wl-bBANK1=0x14000 -Wl-bBANK2=0x24000 -Wl-bBANK3=0x34000 $(SSH_LDFLAGS) -Wl-r -o $@ $^
 
 $(BUILDDIR)/rtlplayground.img: $(BUILDDIR)/rtlplayground.ihx
 	objcopy --input-target=ihex -O binary $< $@

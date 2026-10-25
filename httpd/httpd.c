@@ -1129,3 +1129,24 @@ do_send:
 		uip_len = 0;
 	}
 }
+
+
+#ifdef SSH
+void ssh_appcall(void) __banked;
+
+void net_appcall(void)
+{
+	if (uip_conn->lport == HTONS(22)) {
+		ssh_appcall();
+		return;
+	}
+	if (uip_connected())
+		for (uint8_t i = 0; i < UIP_CONNS; i++)
+			if (&uip_conns[i] != uip_conn && uip_conns[i].lport == HTONS(80) &&
+			    uip_conns[i].tcpstateflags != UIP_CLOSED) {
+				uip_abort();
+				return;
+			}
+	httpd_appcall();
+}
+#endif

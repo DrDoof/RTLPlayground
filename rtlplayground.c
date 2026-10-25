@@ -34,6 +34,9 @@
 #include "httpd/page_impl.h"
 #include "boot.h"
 #include "sfp.h"
+#ifdef SSH
+#include "ssh/ssh_fw.h"
+#endif
 
 extern __code const struct machine machine;
 extern __xdata uint32_t flash_size;
@@ -1223,7 +1226,11 @@ static void handle_tick(void)
 
 void idle(void)
 {
+#ifdef SSH
+	if (!evflags && !ssh_active)
+#else
 	if (!evflags)
+#endif
 		PCON |= 1;
 	health_loop_start();
 	if (tick_pending) {
@@ -1256,6 +1263,9 @@ void idle(void)
 		print_cmd_prompt();
 	}
 	health_phase(HEALTH_PH_CMD);
+#ifdef SSH
+	ssh_idle();
+#endif
 }
 
 
@@ -1728,6 +1738,9 @@ void main(void)
 	uip_init();
 	uip_arp_init();
 	httpd_init();
+#ifdef SSH
+	ssh_start();
+#endif
 	lldp_init();
 
 	management_vlan = 1; // Default management VLAN is 1

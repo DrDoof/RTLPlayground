@@ -94,7 +94,11 @@ typedef unsigned short uip_stats_t;
  *
  * \hideinitializer
  */
+#ifdef SSH
+#define UIP_CONF_MAX_CONNECTIONS 2
+#else
 #define UIP_CONF_MAX_CONNECTIONS 1
+#endif
 
 /**
  * This httpd closes after every response, so an ESTABLISHED connection
@@ -116,7 +120,11 @@ typedef unsigned short uip_stats_t;
  *
  * \hideinitializer
  */
+#ifdef SSH
+#define UIP_CONF_MAX_LISTENPORTS 2
+#else
 #define UIP_CONF_MAX_LISTENPORTS 1
+#endif
 
 /**
  * uIP buffer size.
@@ -185,6 +193,10 @@ typedef unsigned short uip_stats_t;
 /* Here we include the header file for the application(s) we use in
    our project. */
 /*#include "smtp.h"*/
+#ifdef SSH
+void net_appcall(void);
+#define UIP_APPCALL net_appcall
+#endif
 #include "httpd.h"
 #include "udp_apps.h"
 /*#include "telnetd.h"*/
