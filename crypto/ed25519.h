@@ -5,6 +5,7 @@
 
 extern __xdata uint8_t ed_sig[64];
 extern __xdata uint8_t ed_pub[32];
+extern __xdata uint8_t es_state;
 
 void ed_init(void);
 void ed_sign_start(__xdata const uint8_t *m32);

@@ -30,6 +30,11 @@
 #define K_WAIT_NEWKEYS 4
 #define K_DONE 5
 #define K_GOT_ECDH 6
+#define K_HASH 7
+#define K_DC0 8
+#define K_DC1 9
+#define K_DD0 10
+#define K_DD1 11
 
 static __code const char v_s[] = "SSH-2.0-RTLPlayground_0.1";
 static __code const char n_kex[] = "curve25519-sha256";
@@ -470,29 +475,30 @@ void ssh_reset(void)
 	q_end();
 }
 
-static __xdata uint8_t derive_letter;
-
-static void derive(__xdata uint8_t *out) __reentrant
+static void derive(__xdata uint8_t *out, uint8_t letter) __reentrant
 {
 	emit_hash = 1;
 	sha256_init();
 	put_mpint(kk);
 	put_x(hh, 32);
-	put_byte(derive_letter);
-	put_x(sid, 32);
+	if (letter) {
+		put_byte(letter);
+		put_x(sid, 32);
+	} else {
+		put_x(out - 32, 32);
+	}
 	sha256_final(out);
-	sha256_init();
-	put_mpint(kk);
-	put_x(hh, 32);
-	put_x(out, 32);
-	sha256_final(out + 32);
 }
+
+__xdata uint8_t ssh_kex_done;
+__xdata uint8_t ssh_step;
 
 void ssh_init(void)
 {
 	eph_ready = 0;
 	eph_job = 0;
 	ssh_active = 0;
+	ssh_kex_done = 0;
 	kex_state = K_DONE;
 	closing = 1;
 	ed_init();
@@ -500,7 +506,8 @@ void ssh_init(void)
 
 void ssh_poll(void)
 {
-	ssh_active = eph_job || kex_state == K_SHARED || kex_state == K_SIGN || kex_state == K_GOT_ECDH;
+	ssh_active = eph_job || (kex_state >= K_SHARED && kex_state <= K_SIGN) || kex_state >= K_GOT_ECDH;
+	ssh_step = eph_job ? 0xe0 : (kex_state << 4) | (kex_state == K_SIGN ? es_state : 0);
 	if (eph_job) {
 		if (x25519_step()) {
 			uint8_t i;
@@ -511,7 +518,7 @@ void ssh_poll(void)
 		}
 		return;
 	}
-	if (!eph_ready && kex_state != K_SHARED && kex_state != K_SIGN) {
+	if (!eph_ready && !(kex_state >= K_SHARED && kex_state <= K_SIGN) && kex_state < K_GOT_ECDH) {
 		uint8_t i;
 		ssh_port_random(eph, 32);
 		for (i = 0; i < 32; i++) {
@@ -544,21 +551,43 @@ void ssh_poll(void)
 				eph[i] = 0;
 			}
 			eph_ready = 0;
-			emit_hash = 1;
-			put_mpint(kk);
-			sha256_final(hh);
-			if (!enc_on)
-				for (i = 0; i < 32; i++)
-					sid[i] = hh[i];
-			derive_letter = 'C';
-			derive(key_c2s);
-			derive_letter = 'D';
-			derive(key_s2c);
-			for (i = 0; i < 32; i++)
-				kk[i] = 0;
-			ed_sign_start(hh);
-			kex_state = K_SIGN;
+			kex_state = K_HASH;
 		}
+		return;
+	}
+	if (kex_state == K_HASH) {
+		uint8_t i;
+		emit_hash = 1;
+		put_mpint(kk);
+		sha256_final(hh);
+		if (!enc_on)
+			for (i = 0; i < 32; i++)
+				sid[i] = hh[i];
+		kex_state = K_DC0;
+		return;
+	}
+	if (kex_state == K_DC0) {
+		derive(key_c2s, 'C');
+		kex_state = K_DC1;
+		return;
+	}
+	if (kex_state == K_DC1) {
+		derive(key_c2s + 32, 0);
+		kex_state = K_DD0;
+		return;
+	}
+	if (kex_state == K_DD0) {
+		derive(key_s2c, 'D');
+		kex_state = K_DD1;
+		return;
+	}
+	if (kex_state == K_DD1) {
+		uint8_t i;
+		derive(key_s2c + 32, 0);
+		for (i = 0; i < 32; i++)
+			kk[i] = 0;
+		ed_sign_start(hh);
+		kex_state = K_SIGN;
 		return;
 	}
 	if (kex_state == K_SIGN) {
@@ -575,6 +604,7 @@ void ssh_poll(void)
 			put_byte(21);
 			q_end();
 			kex_state = K_WAIT_NEWKEYS;
+			ssh_kex_done = 1;
 		}
 	}
 }

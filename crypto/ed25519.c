@@ -18,7 +18,8 @@ static __xdata uint8_t h64[64];
 static __xdata uint8_t sc_r[32], sc_k[32];
 static __xdata uint8_t acc[32], tmp[32];
 static __xdata const uint8_t * __xdata msg;
-static __xdata uint8_t es_state, es_i;
+__xdata uint8_t es_state;
+static __xdata uint8_t es_i;
 static __xdata int16_t es_pos;
 
 static __code const uint8_t sc_l[32] = {
@@ -71,16 +72,26 @@ static void sc_add(__xdata const uint8_t *b)
 	sc_cond_sub_l();
 }
 
-static void sc_reduce64(__xdata uint8_t *out)
-{
-	static __xdata int16_t i;
+static __xdata int16_t red_pos;
 
+static void sc_red_begin(void)
+{
 	for (es_i = 0; es_i < 32; es_i++)
 		acc[es_i] = 0;
-	for (i = 511; i >= 0; i--)
-		sc_dbl((h64[i >> 3] >> (i & 7)) & 1);
+	red_pos = 511;
+}
+
+static uint8_t sc_red_step(__xdata uint8_t *out)
+{
+	static __xdata uint8_t n;
+
+	for (n = 0; n < 64 && red_pos >= 0; n++, red_pos--)
+		sc_dbl((h64[red_pos >> 3] >> (red_pos & 7)) & 1);
+	if (red_pos >= 0)
+		return 0;
 	for (es_i = 0; es_i < 32; es_i++)
 		out[es_i] = acc[es_i];
+	return 1;
 }
 
 static void copyc(__xdata uint8_t *d, __code const uint8_t *s, uint8_t n)
@@ -140,27 +151,39 @@ void ed_init(void)
 void ed_sign_start(__xdata const uint8_t *m32)
 {
 	msg = m32;
-	sha512_init();
-	copyc(tmp, ed_key_prefix, 32);
-	sha512_update(tmp, 32);
-	sha512_update(msg, 32);
-	sha512_final(h64);
-	sc_reduce64(sc_r);
-	for (es_i = 0; es_i < 32; es_i++) {
-		px[es_i] = 0;
-		py[es_i] = 0;
-		pz[es_i] = 0;
-		pt[es_i] = 0;
-	}
-	py[0] = 1;
-	pz[0] = 1;
-	es_pos = 252;
-	es_state = 1;
+	es_state = 10;
 }
 
 uint8_t ed_sign_step(void)
 {
-	if (es_state == 1) {
+	static __xdata int16_t i;
+	static __xdata uint8_t n;
+
+	switch (es_state) {
+	case 10:
+		sha512_init();
+		copyc(tmp, ed_key_prefix, 32);
+		sha512_update(tmp, 32);
+		sha512_update(msg, 32);
+		sha512_final(h64);
+		sc_red_begin();
+		es_state = 11;
+		return 0;
+	case 11:
+		if (!sc_red_step(sc_r))
+			return 0;
+		for (es_i = 0; es_i < 32; es_i++) {
+			px[es_i] = 0;
+			py[es_i] = 0;
+			pz[es_i] = 0;
+			pt[es_i] = 0;
+		}
+		py[0] = 1;
+		pz[0] = 1;
+		es_pos = 252;
+		es_state = 1;
+		return 0;
+	case 1:
 		ed_double();
 		if ((sc_r[es_pos >> 3] >> (es_pos & 7)) & 1)
 			ed_add_base();
@@ -169,40 +192,46 @@ uint8_t ed_sign_step(void)
 			es_state = 2;
 		}
 		return 0;
-	}
-	if (es_state == 2) {
+	case 2:
 		if (x25519_step())
 			es_state = 3;
 		return 0;
-	}
-	if (es_state == 3) {
+	case 3:
 		FE_MUL(ef, px, ee);
 		FE_MUL(ed_sig, py, ee);
 		fe_freeze(ef);
 		fe_freeze(ed_sig);
 		ed_sig[31] |= (ef[0] & 1) << 7;
+		es_state = 5;
+		return 0;
+	case 5:
 		sha512_init();
 		sha512_update(ed_sig, 32);
 		sha512_update(ed_pub, 32);
 		sha512_update(msg, 32);
 		sha512_final(h64);
-		sc_reduce64(sc_k);
-		es_state = 4;
+		sc_red_begin();
+		es_state = 6;
 		return 0;
-	}
-	if (es_state == 4) {
-		static __xdata int16_t i;
-
+	case 6:
+		if (!sc_red_step(sc_k))
+			return 0;
 		copyc(tmp, ed_key_a, 32);
 		for (es_i = 0; es_i < 32; es_i++) {
 			h64[es_i] = tmp[es_i];
 			acc[es_i] = 0;
 		}
-		for (i = 254; i >= 0; i--) {
+		i = 254;
+		es_state = 4;
+		return 0;
+	case 4:
+		for (n = 0; n < 32 && i >= 0; n++, i--) {
 			sc_dbl(0);
 			if ((h64[i >> 3] >> (i & 7)) & 1)
 				sc_add(sc_k);
 		}
+		if (i >= 0)
+			return 0;
 		sc_add(sc_r);
 		for (es_i = 0; es_i < 32; es_i++)
 			ed_sig[32 + es_i] = acc[es_i];

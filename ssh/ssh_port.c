@@ -15,6 +15,24 @@ extern __xdata char passwd[21];
 void execute_commands(__xdata uint8_t *p) __banked;
 
 __xdata uint8_t * __xdata ssh_port_out;
+
+extern volatile __xdata uint32_t ticks;
+extern __xdata uint8_t ssh_kex_done;
+extern __xdata uint8_t ssh_step;
+static __xdata uint32_t t_kex0;
+static __xdata uint16_t t_max_step, t_max_rx, n_steps;
+static __xdata uint8_t c_max_step;
+
+static uint32_t now(void)
+{
+	static __xdata uint32_t a, b;
+
+	do {
+		a = ticks;
+		b = ticks;
+	} while (a != b);
+	return a;
+}
 static __xdata struct uip_conn * __xdata ssh_conn;
 
 void ssh_port_random(__xdata uint8_t *p, uint8_t n) __reentrant
@@ -57,7 +75,33 @@ void ssh_start(void) __banked
 
 void ssh_idle(void) __banked
 {
+	static __xdata uint32_t t0;
+	static __xdata uint16_t dt;
+
+	t0 = now();
 	ssh_poll();
+	if (!ssh_active && !ssh_kex_done)
+		return;
+	dt = now() - t0;
+	n_steps++;
+	if (dt > t_max_step) {
+		t_max_step = dt;
+		c_max_step = ssh_step;
+	}
+	if (ssh_kex_done) {
+		ssh_kex_done = 0;
+		print_string("ssh: kex ");
+		print_long(now() - t_kex0);
+		print_string(" ticks, steps ");
+		print_short(n_steps);
+		print_string(", max step ");
+		print_short(t_max_step);
+		print_string(" at ");
+		print_byte(c_max_step);
+		print_string(", max rx ");
+		print_short(t_max_rx);
+		write_char('\n');
+	}
 }
 
 void ssh_appcall(void) __banked
@@ -71,6 +115,9 @@ void ssh_appcall(void) __banked
 		}
 		ssh_conn = uip_conn;
 		ssh_reset();
+		t_kex0 = now();
+		t_max_step = t_max_rx = n_steps = 0;
+		c_max_step = 0;
 	}
 	if (uip_conn != ssh_conn)
 		return;
@@ -80,8 +127,16 @@ void ssh_appcall(void) __banked
 	}
 	if (uip_acked())
 		ssh_acked();
-	if (uip_newdata())
+	if (uip_newdata()) {
+		static __xdata uint32_t t0;
+		static __xdata uint16_t dt;
+
+		t0 = now();
 		ssh_input((__xdata uint8_t *)uip_appdata, uip_datalen());
+		dt = now() - t0;
+		if (dt > t_max_rx)
+			t_max_rx = dt;
+	}
 	if (uip_rexmit()) {
 		n = ssh_output((__xdata uint8_t *)uip_appdata, uip_mss(), 1);
 		if (n)
