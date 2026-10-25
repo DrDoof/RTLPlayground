@@ -114,6 +114,7 @@ int main(int argc, char **argv)
 {
 	int port = argc > 1 ? atoi(argv[1]) : 2222;
 	int mss = argc > 2 ? atoi(argv[2]) : 1460;
+	int rxchunk = argc > 3 ? atoi(argv[3]) : mss;
 	int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
 	setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
 	struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
@@ -132,8 +133,8 @@ int main(int argc, char **argv)
 			if (select(s + 1, &rf, NULL, NULL, &tv) > 0) {
 				ssize_t r = read(s, in, sizeof in);
 				if (r <= 0) break;
-				for (ssize_t off = 0; off < r; off += mss) {
-					uint16_t k = r - off < mss ? r - off : mss;
+				for (ssize_t off = 0; off < r; off += rxchunk) {
+					uint16_t k = r - off < rxchunk ? r - off : rxchunk;
 					ssh_input(in + off, k);
 				}
 			}

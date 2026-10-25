@@ -90,9 +90,12 @@ static void add(__xdata uint32_t *dh, __xdata uint32_t *dl, uint32_t ah, uint32_
 	*dl = l;
 }
 
-static void sha512_block(void) __reentrant
+static __xdata uint8_t blk_round;
+static __xdata uint8_t * __xdata fin_out;
+
+static void blk_begin(void)
 {
-	static __xdata uint8_t i, j;
+	static __xdata uint8_t i;
 	__xdata uint8_t *p = sha512.buf;
 
 	for (i = 0; i < 32; i++) {
@@ -101,7 +104,15 @@ static void sha512_block(void) __reentrant
 	}
 	for (i = 0; i < 16; i++)
 		v[i] = sha512.h[i];
-	for (i = 0; i < 80; i++) {
+	blk_round = 0;
+}
+
+static uint8_t blk_rounds(uint8_t n) __reentrant
+{
+	static __xdata uint8_t i, j;
+
+	for (; n && blk_round < 80; n--, blk_round++) {
+		i = blk_round;
 		j = (i & 15) << 1;
 		if (i >= 16) {
 			xh = w[(j + 2) & 31];
@@ -138,8 +149,22 @@ static void sha512_block(void) __reentrant
 		v[1] = t1l;
 		add(&v[0], &v[1], t2h, t2l);
 	}
+	return blk_round == 80;
+}
+
+static void blk_end(void)
+{
+	static __xdata uint8_t i;
+
 	for (i = 0; i < 16; i += 2)
 		add(&sha512.h[i], &sha512.h[i + 1], v[i], v[i + 1]);
+}
+
+static void sha512_block(void)
+{
+	blk_begin();
+	blk_rounds(80);
+	blk_end();
 }
 
 void sha512_init(void)
@@ -164,11 +189,11 @@ void sha512_update(__xdata const uint8_t *p, uint16_t n) __reentrant
 	}
 }
 
-void sha512_final(__xdata uint8_t *out) __reentrant
+void sha512_final_begin(__xdata uint8_t *out) __reentrant
 {
-	static __xdata uint8_t i;
 	static __xdata uint32_t bits;
 
+	fin_out = out;
 	bits = (uint32_t)sha512.len << 3;
 	sha512.buf[sha512.fill++] = 0x80;
 	if (sha512.fill > 112) {
@@ -183,7 +208,24 @@ void sha512_final(__xdata uint8_t *out) __reentrant
 	sha512.buf[125] = bits >> 16;
 	sha512.buf[126] = bits >> 8;
 	sha512.buf[127] = bits;
-	sha512_block();
+	blk_begin();
+}
+
+uint8_t sha512_final_step(void)
+{
+	static __xdata uint8_t i;
+
+	if (!blk_rounds(20))
+		return 0;
+	blk_end();
 	for (i = 0; i < 64; i++)
-		out[i] = sha512.h[i >> 2] >> (24 - ((i & 3) << 3));
+		fin_out[i] = sha512.h[i >> 2] >> (24 - ((i & 3) << 3));
+	return 1;
+}
+
+void sha512_final(__xdata uint8_t *out) __reentrant
+{
+	sha512_final_begin(out);
+	while (!sha512_final_step())
+		;
 }

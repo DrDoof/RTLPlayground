@@ -1425,6 +1425,12 @@ uip_process(u8_t flag) __banked
   BUF->optdata[1] = TCP_OPT_MSS_LEN;
   BUF->optdata[2] = (UIP_TCP_MSS) / 256;
   BUF->optdata[3] = (UIP_TCP_MSS) & 255;
+#ifdef SSH
+  if(uip_connr->lport == HTONS(22)) {
+    BUF->optdata[2] = 0;
+    BUF->optdata[3] = 128;
+  }
+#endif
   uip_len = UIP_IPTCPH_LEN + TCP_OPT_MSS_LEN;
   BUF->tcpoffset = ((UIP_TCPH_LEN + TCP_OPT_MSS_LEN) / 4) << 4;
   goto tcp_send;

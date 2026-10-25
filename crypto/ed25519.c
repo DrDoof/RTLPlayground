@@ -165,7 +165,12 @@ uint8_t ed_sign_step(void)
 		copyc(tmp, ed_key_prefix, 32);
 		sha512_update(tmp, 32);
 		sha512_update(msg, 32);
-		sha512_final(h64);
+		sha512_final_begin(h64);
+		es_state = 12;
+		return 0;
+	case 12:
+		if (!sha512_final_step())
+			return 0;
 		sc_red_begin();
 		es_state = 11;
 		return 0;
@@ -209,7 +214,12 @@ uint8_t ed_sign_step(void)
 		sha512_update(ed_sig, 32);
 		sha512_update(ed_pub, 32);
 		sha512_update(msg, 32);
-		sha512_final(h64);
+		sha512_final_begin(h64);
+		es_state = 7;
+		return 0;
+	case 7:
+		if (!sha512_final_step())
+			return 0;
 		sc_red_begin();
 		es_state = 6;
 		return 0;

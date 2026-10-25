@@ -15,5 +15,7 @@ extern __xdata struct sha512_t sha512;
 void sha512_init(void);
 void sha512_update(__xdata const uint8_t *p, uint16_t n) __reentrant;
 void sha512_final(__xdata uint8_t *out) __reentrant;
+void sha512_final_begin(__xdata uint8_t *out) __reentrant;
+uint8_t sha512_final_step(void);
 
 #endif
