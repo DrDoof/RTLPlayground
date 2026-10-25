@@ -22,6 +22,10 @@ extern __xdata uint8_t ssh_step;
 static __xdata uint32_t t_kex0;
 static __xdata uint16_t t_max_step, t_max_rx, n_steps;
 static __xdata uint8_t c_max_step;
+static __xdata uint16_t t_max_app;
+static __xdata uint8_t f_max_app;
+static __xdata uint32_t t_last_loop, t_gap_at;
+static __xdata uint16_t t_max_gap;
 
 static uint32_t now(void)
 {
@@ -79,6 +83,12 @@ void ssh_idle(void) __banked
 	static __xdata uint16_t dt;
 
 	t0 = now();
+	dt = t0 - t_last_loop;
+	t_last_loop = t0;
+	if (dt > t_max_gap) {
+		t_max_gap = dt;
+		t_gap_at = t0;
+	}
 	ssh_poll();
 	if (!ssh_active && !ssh_kex_done)
 		return;
@@ -100,11 +110,20 @@ void ssh_idle(void) __banked
 		print_byte(c_max_step);
 		print_string(", max rx ");
 		print_short(t_max_rx);
+		print_string(", max app ");
+		print_short(t_max_app);
+		print_string(" flags ");
+		print_byte(f_max_app);
+		print_string(", max loop gap ");
+		print_short(t_max_gap);
+		print_string(" at ");
+		print_long(t_gap_at - t_kex0);
+		t_max_gap = 0;
 		write_char('\n');
 	}
 }
 
-void ssh_appcall(void) __banked
+static void appcall(void)
 {
 	static __xdata uint16_t n;
 
@@ -116,7 +135,7 @@ void ssh_appcall(void) __banked
 		ssh_conn = uip_conn;
 		ssh_reset();
 		t_kex0 = now();
-		t_max_step = t_max_rx = n_steps = 0;
+		t_max_step = t_max_rx = n_steps = t_max_app = 0;
 		c_max_step = 0;
 	}
 	if (uip_conn != ssh_conn)
@@ -152,4 +171,20 @@ void ssh_appcall(void) __banked
 	}
 	if (ssh_closing())
 		uip_close();
+}
+
+void ssh_appcall(void) __banked
+{
+	static __xdata uint32_t a0;
+	static __xdata uint16_t da;
+	static __xdata uint8_t f;
+
+	f = uip_flags;
+	a0 = now();
+	appcall();
+	da = now() - a0;
+	if (da > t_max_app) {
+		t_max_app = da;
+		f_max_app = f;
+	}
 }
