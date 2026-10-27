@@ -13,7 +13,6 @@ __xdata __at(0xbe20) uint8_t fm_b[32];
 __xdata __at(0xbe40) uint8_t fm_p[64];
 __xdata __at(0xbe80) uint8_t fm_r[32];
 
-static __xdata uint32_t col[32];
 static __xdata uint8_t x1[32], x2[32], z2[32], x3[32], z3[32];
 static __xdata uint8_t ta[32], tb[32], tc[32], td[32], te[32], tf[32], tg[32];
 static __xdata uint8_t i0[32], i1[32], i2[32];
@@ -23,13 +22,14 @@ static void fe_mul121665(void)
 	static __xdata uint8_t i, v;
 	static __xdata uint32_t t;
 
-	for (i = 0; i < 32; i++) {
-		v = te[i];
-		col[i] = (uint16_t)v * 0x41 + ((uint32_t)((uint16_t)v * 0xdb) << 8) + ((uint32_t)v << 16);
-	}
 	t = 0;
 	for (i = 0; i < 32; i++) {
-		t += col[i];
+		/* Consume each independent column immediately: the carry is at most
+		 * 121664, so the sum is < 121665 * 256 and fits in 32 bits.
+		 * This preserves the exact byte/carry sequence without a 128-byte
+		 * XDATA round trip through col[]. */
+		v = te[i];
+		t += (uint16_t)v * 0x41 + ((uint32_t)((uint16_t)v * 0xdb) << 8) + ((uint32_t)v << 16);
 		ta[i] = t;
 		t >>= 8;
 	}
