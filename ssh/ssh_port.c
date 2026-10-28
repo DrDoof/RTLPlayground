@@ -141,6 +141,7 @@ static void appcall(void)
 	if (uip_conn != ssh_conn)
 		return;
 	if (uip_closed() || uip_aborted() || uip_timedout()) {
+		ssh_input_eof();
 		ssh_conn = 0;
 		return;
 	}
