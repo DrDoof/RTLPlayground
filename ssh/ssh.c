@@ -653,12 +653,19 @@ void ssh_poll(void)
 }
 
 /* All cursor failures are terminal. Check the full wire width before narrowing. */
+static uint32_t read_u32(void)
+{
+ uint32_t v;
+ v = rp[0];
+ v = (v << 8) | rp[1];
+ v = (v << 8) | rp[2];
+ v = (v << 8) | rp[3];
+ rp += 4; rlen -= 4; return v;
+}
 static uint32_t get_u32(void)
 {
- static __xdata uint32_t v;
  if (closing || rlen < 4) { reject(); return 0; }
- v = ((uint32_t)rp[0]<<24) | ((uint32_t)rp[1]<<16) | ((uint16_t)rp[2]<<8) | rp[3];
- rp += 4; rlen -= 4; return v;
+ return read_u32();
 }
 static uint8_t get_byte(void)
 {
@@ -928,6 +935,12 @@ static void kex_name_end(void)
  else if (ks_first && ks_field < 2) ks_guess=0;
  ks_first=0; ks_pos=0; ks_match=1;
 }
+/* Leaf helper: private existing KEX state; never invoked from interrupts. */
+static uint8_t kex_length_byte(uint8_t b)
+{
+ ks_length=(ks_length<<8)|b;
+ return ks_length <= ks_remaining;
+}
 static void kex_byte(uint8_t b)
 {
  if (!ks_remaining || ks_state == 6) { reject(); return; }
@@ -938,11 +951,13 @@ static void kex_byte(uint8_t b)
  } else if (ks_state == 1) {
   if (!--ks_n) { ks_state=2; ks_length=0; }
  } else if (ks_state == 2) {
-  ks_length=(ks_length<<8)|b;
-  if (++ks_n != 4) return;
-  if (ks_length > ks_remaining) { reject(); return; }
-  ks_expected = ks_field==0 ? n_kex : ks_field==1 ? n_hostkey :
-                ks_field<4 ? n_cipher : (ks_field==6 || ks_field==7) ? n_none : 0;
+  if (++ks_n != 4) { kex_length_byte(b); return; }
+  if (!kex_length_byte(b)) { reject(); return; }
+  if (ks_field == 0) ks_expected = n_kex;
+  else if (ks_field == 1) ks_expected = n_hostkey;
+  else if (ks_field < 4) ks_expected = n_cipher;
+  else if (ks_field == 6 || ks_field == 7) ks_expected = n_none;
+  else ks_expected = 0;
   ks_left=(uint16_t)ks_length; ks_pos=0; ks_match=1; ks_found=0; ks_first=1;
   if (!ks_left) {
    if (ks_expected) { reject(); return; }
