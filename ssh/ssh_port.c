@@ -6,11 +6,17 @@
 #include "../uip/uip.h"
 #include "ssh.h"
 #include "ssh_fw.h"
+#if SYS_TICK_HZ != 200
+#error SSH deadline constants require 200 Hz ticks
+#endif
+#if UIP_TCP_MSS > SSH_WIRE_MAX
+#error SSH wire snapshot is smaller than configured MSS
+#endif
 
 extern volatile __xdata uint8_t sfr_data[4];
 extern __xdata uint8_t cmd_capture;
-extern __xdata uint8_t outbuf[TCP_OUTBUF_SIZE];
-extern __xdata uint16_t slen;
+__xdata uint8_t ssh_command_buf[TCP_OUTBUF_SIZE];
+__xdata uint16_t ssh_command_len;
 extern __xdata char passwd[21];
 void execute_commands(__xdata uint8_t *p) __banked;
 
@@ -62,12 +68,12 @@ uint8_t ssh_port_auth(__xdata const uint8_t *pw, uint8_t len)
 
 uint16_t ssh_port_exec(__xdata uint8_t *line)
 {
-	ssh_port_out = outbuf;
-	slen = 0;
-	cmd_capture = 1;
+	ssh_port_out = ssh_command_buf;
+	ssh_command_len = 0;
+	cmd_capture = 3;
 	execute_commands(line);
 	cmd_capture = 0;
-	return slen;
+	return ssh_command_len;
 }
 
 void ssh_start(void) __banked
@@ -83,6 +89,10 @@ void ssh_idle(void) __banked
 	static __xdata uint16_t dt;
 
 	t0 = now();
+	ssh_timeout(t0);
+	/* Force the next periodic sweep to notify a terminal owner even if
+	 * TCP was waiting on a backed-off retransmission timer. */
+	if (ssh_conn && ssh_closing()) ssh_conn->timer = 0;
 	dt = t0 - t_last_loop;
 	t_last_loop = t0;
 	if (dt > t_max_gap) {
@@ -133,6 +143,7 @@ static void appcall(void)
 			return;
 		}
 		ssh_conn = uip_conn;
+		ssh_timeout(now());
 		ssh_reset();
 		t_kex0 = now();
 		t_max_step = t_max_rx = n_steps = t_max_app = 0;
@@ -141,6 +152,14 @@ static void appcall(void)
 	if (uip_conn != ssh_conn)
 		return;
 	if (uip_closed() || uip_aborted() || uip_timedout()) {
+		ssh_input_eof();
+		ssh_conn = 0;
+		return;
+	}
+	/* Check absolute deadlines before accepting data or ACK-driven progress. */
+	ssh_timeout(now());
+	if (ssh_closing()) {
+		uip_abort();
 		ssh_input_eof();
 		ssh_conn = 0;
 		return;
@@ -157,8 +176,15 @@ static void appcall(void)
 		if (dt > t_max_rx)
 			t_max_rx = dt;
 	}
+	/* Terminal protocol cleanup must also run while TCP has old bytes in flight. */
+	if (ssh_closing()) {
+		uip_abort();
+		ssh_input_eof();
+		ssh_conn = 0;
+		return;
+	}
 	if (uip_rexmit()) {
-		n = ssh_output((__xdata uint8_t *)uip_appdata, uip_mss(), 1);
+		n = ssh_output((__xdata uint8_t *)uip_appdata, SSH_WIRE_MAX, 1);
 		if (n)
 			uip_send(uip_appdata, n);
 		return;

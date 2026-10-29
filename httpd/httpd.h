@@ -13,6 +13,7 @@
 typedef struct httpd_state {
    uint8_t tstate;
    uint8_t fw_reset_pending;
+   uint8_t output_generation;
 } uip_tcp_appstate_t;
 
 /* Finally we define the application function to be called by uIP. */

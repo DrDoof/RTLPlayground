@@ -835,6 +835,9 @@ uip_process(u8_t flag) __banked
 	    uip_flags = UIP_REXMIT;
             dbg_char('R');
 	    UIP_APPCALL();
+	    /* A terminal application deadline may expire during retry backoff.
+	     * Honor cleanup without resetting retransmit counters otherwise. */
+	    if(uip_flags & (UIP_ABORT | UIP_CLOSE)) goto appsend;
 	    goto apprexmit;
 	    
 	  case UIP_FIN_WAIT_1:

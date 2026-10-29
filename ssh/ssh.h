@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 #define SSH_PORT 22
+#define SSH_WIRE_MAX 1460
+void ssh_timeout(uint32_t tick) __reentrant;
 
 void ssh_init(void);
 void ssh_reset(void);

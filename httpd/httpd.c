@@ -40,6 +40,8 @@ __xdata uint16_t write_len;
 __xdata uint8_t outbuf[TCP_OUTBUF_SIZE];
 __xdata uint8_t entry;
 __xdata uint16_t slen;
+static __xdata struct uip_conn * __xdata http_owner;
+static __xdata uint8_t http_generation;
 __xdata uint16_t o_idx;
 __xdata uint16_t sent_len;
 __xdata uint16_t len_left;
@@ -101,6 +103,7 @@ inline uint8_t is_separator(uint8_t c)
 
 void httpd_init(void) __banked
 {
+	http_owner = 0; http_generation = 0;
 	config_upload = 0; // xdata is not zeroed by the startup code
 	// Start listening to port 80
 	uip_listen(HTONS(80));
@@ -867,7 +870,7 @@ static void tx_send(uint16_t len)
 }
 
 
-void httpd_appcall(void)
+static void httpd_owned_appcall(void)
 {
 	__xdata struct httpd_state * __xdata s = &(uip_conn->appstate);
 
@@ -1130,6 +1133,32 @@ do_send:
 	}
 }
 
+
+/* Global HTTP construction state belongs to exactly one TCP incarnation.
+ * A closing owner remains reserved until terminal notification or response
+ * completion; a reused slot is claimed only by its connected event. No deferred
+ * callbacks exist in uIP. Generation comparisons fence non-owner callbacks. */
+void httpd_appcall(void)
+{
+ if (uip_connected()) {
+  if (http_owner && http_owner->lport == HTONS(80) && http_owner != uip_conn &&
+      (http_owner->tcpstateflags & UIP_TS_MASK) != UIP_CLOSED) { uip_abort(); return; }
+  http_owner = uip_conn;
+  http_generation++;
+  uip_conn->appstate.output_generation = http_generation;
+  slen = o_idx = sent_len = cont_len = 0;
+  pre_acc = 0; config_upload = 0; postbody_endpoint = 0;
+  content_type = session = 0;
+  content_length = bindex = 0; verify_crc = 0;
+ } else if (http_owner != uip_conn ||
+            uip_conn->appstate.output_generation != http_generation) return;
+ httpd_owned_appcall();
+ if (uip_closed() || uip_aborted() || uip_timedout() ||
+     uip_conn->appstate.tstate == TSTATE_CLOSED) {
+  http_owner = 0;
+  slen = o_idx = sent_len = cont_len = 0;
+ }
+}
 
 #ifdef SSH
 void ssh_appcall(void) __banked;

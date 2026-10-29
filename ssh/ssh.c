@@ -62,6 +62,10 @@ static __xdata uint32_t rx_seq, tx_seq;
 static __xdata uint8_t txq[TXQMAX];
 static __xdata uint16_t txq_len;
 static __xdata uint16_t fl_q, fl_src, fl_win;
+static __xdata uint8_t flight[SSH_WIRE_MAX];
+static __xdata uint16_t flight_len;
+static __xdata uint32_t clock_tick, phase_at, fragment_at, stall_at;
+static __xdata uint8_t phase, fragment_pending, stall_pending;
 static __xdata uint8_t fl_pkts, fl_on;
 
 static __xdata uint8_t kex_state;
@@ -98,6 +102,8 @@ static void reject(void)
 	authed = chan_open = 0;
 	txq_len = src_len = src_pos = 0;
 	fl_on = 0;
+	flight_len = 0;
+	fragment_pending = stall_pending = 0;
 	rlen = 0;
 }
 
@@ -337,19 +343,22 @@ static __xdata uint8_t cbuf[LOCAL_MAXPKT];
 
 uint16_t ssh_output(__xdata uint8_t *out, uint16_t max, uint8_t rexmit) __reentrant
 {
-	static __xdata uint16_t qpos, n, lim_q, lim_src, take, room, i, j;
+	static __xdata uint16_t qpos, n, take, room, i, j;
 
 	if (closing && !txq_len)
 		return 0;
-	if (fl_on && !rexmit)
-		return 0;
-	lim_q = rexmit ? fl_q : 0xffff;
-	lim_src = rexmit ? fl_src : 0xffff;
+	if (rexmit) {
+		if (!fl_on || max < flight_len) return 0;
+		for (i = 0; i < flight_len; i++) out[i] = flight[i];
+		return flight_len;
+	}
+	if (fl_on) return 0;
+	if (max > SSH_WIRE_MAX) max = SSH_WIRE_MAX;
 	wp = out;
 	wleft = max;
 	fl_pkts = 0;
 	qpos = 0;
-	while (qpos < txq_len && qpos < lim_q) {
+	while (qpos < txq_len) {
 		n = ((uint16_t)txq[qpos] << 8) | txq[qpos + 1];
 		pk_flags = txq[qpos + 2];
 		if (pkt_size(n, pk_flags) > wleft)
@@ -372,7 +381,7 @@ uint16_t ssh_output(__xdata uint8_t *out, uint16_t max, uint8_t rexmit) __reentr
 		if (room > remote_maxpkt)
 			room = remote_maxpkt;
 		j = 0;
-		while (take < src_len - src_pos && take < lim_src) {
+		while (take < src_len - src_pos) {
 			if (pty && ssh_port_out[src_pos + take] == '\n') {
 				if (j + 2 > room)
 					break;
@@ -405,11 +414,15 @@ uint16_t ssh_output(__xdata uint8_t *out, uint16_t max, uint8_t rexmit) __reentr
 	} else {
 		i = 0;
 	}
-	if (!rexmit) {
+	{ /* New-flight commit: retransmissions returned before serialization. */
 		fl_q = qpos;
 		fl_src = take;
 		fl_win = i;
-		fl_on = wp != out;
+		/* Reserve source credit once, before callbacks can enqueue more data. */
+		remote_window -= i;
+		flight_len = wp - out;
+		for (i = 0; i < flight_len; i++) flight[i] = out[i];
+		fl_on = flight_len != 0;
 	}
 	return wp - out;
 }
@@ -477,13 +490,14 @@ void ssh_acked(void)
 
 	if (!fl_on)
 		return;
+	if (fl_src || !src_len) stall_at = clock_tick;
 	for (i = fl_q; i < txq_len; i++)
 		txq[i - fl_q] = txq[i];
 	txq_len -= fl_q;
 	src_pos += fl_src;
-	remote_window -= fl_win;
 	tx_seq += fl_pkts;
 	fl_on = 0;
+	flight_len = 0;
 	if (chan_open && src_len && src_pos >= src_len) {
 		src_pos = src_len = 0;
 		if (shell)
@@ -496,6 +510,9 @@ void ssh_acked(void)
 void ssh_reset(void)
 {
 	rx_have = 0;
+	phase = 0; phase_at = clock_tick;
+	fragment_pending = stall_pending = 0;
+	flight_len = 0;
 	rx_state = ST_VERSION;
 	rx_seq = tx_seq = 0;
 	txq_len = 0;
@@ -545,6 +562,26 @@ void ssh_init(void)
 	kex_state = K_DONE;
 	closing = 1;
 	ed_init();
+}
+
+/* Foreground-only absolute deadlines: 200 ticks/s; unrelated traffic never
+ * refreshes phase/fragment deadlines. Successful whole ACK alone advances stall.
+ * All intervals < 2^31; unsigned subtraction handles tick wrap. */
+void ssh_timeout(uint32_t tick) __reentrant
+{
+ static __xdata uint8_t next_phase;
+ clock_tick = tick;
+ if (closing) return;
+ next_phase = rx_state == ST_VERSION ? 0 : (!enc_on ? 1 : (!authed ? 2 : 3));
+ if (next_phase != phase) { phase = next_phase; phase_at = tick; }
+ if ((phase == 0 && (uint32_t)(tick-phase_at) >= 3000UL) ||
+     (phase == 1 && (uint32_t)(tick-phase_at) >= 18000UL) ||
+     (phase == 2 && (uint32_t)(tick-phase_at) >= 12000UL) ||
+     (fragment_pending && (uint32_t)(tick-fragment_at) >= 2000UL)) { reject(); return; }
+ if (txq_len || src_len || fl_on) {
+  if (!stall_pending) { stall_pending=1; stall_at=tick; }
+  else if ((uint32_t)(tick-stall_at) >= 6000UL) reject();
+ } else stall_pending=0;
 }
 
 void ssh_poll(void)
@@ -845,12 +882,16 @@ static void handle_enc(uint8_t msg) __reentrant
   get_str(); want = get_bool(); if (closing) return;
   if (str_is(n_ptyreq)) {
    get_str(); get_u32(); get_u32(); get_u32(); get_u32(); get_str();
-   if (!parsed()) return; pty = 1;
+   if (!parsed()) return;
+   if (shell || exec_done || src_len || fl_on) { reject(); return; }
+   pty = 1;
   } else if (str_is(n_shell)) {
-   if (!parsed()) return; shell = 1;
+   if (!parsed()) return;
+   if (shell || exec_done || src_len) { reject(); return; }
+   shell = 1;
   } else if (str_is(n_exec)) {
    get_str(); if (!parsed()) return;
-   if (slen > LINEMAX) { reject(); return; }
+   if (slen > LINEMAX || shell || exec_done || src_len) { reject(); return; }
    for (i=0; i<slen; i++) if (!sp[i]) { reject(); return; }
    for (line_len=0; line_len<slen; line_len++) line[line_len]=sp[line_len];
    run_line(); exec_done=1;
@@ -992,6 +1033,7 @@ void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant
 	static __xdata uint8_t c;
 
 	while (n && !closing) {
+		if (!fragment_pending) { fragment_pending=1; fragment_at=clock_tick; }
 		if (rx_state == ST_VERSION) {
 			c = *p++;
 			n--;
@@ -1009,6 +1051,7 @@ void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant
 				put_str(rxbuf, rx_have);
 				put_u32(clen(v_s));
 				put_c(v_s);
+				fragment_pending=0;
 				rx_have = 0;
 				rx_need = 5;
 				rx_state = ST_HEADER;
@@ -1041,6 +1084,7 @@ void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant
 					return;
 				}
 				rx_seq++;
+				fragment_pending=0;
 				handle_enc(rxbuf[5]);
 				rx_have = 0;
 				rx_need = 4;
@@ -1102,6 +1146,7 @@ void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant
 				put_kexinit();
 				put_hostkey();
 				rx_seq++;
+				fragment_pending=0;
 				kex_state = K_WAIT_ECDH;
 				rx_have = 0;
 				rx_state = ST_HEADER;
@@ -1117,6 +1162,7 @@ void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant
 			if (rx_seq == 0xffffffffUL) { reject(); return; }
 			rx_seq++;
 			rlen = rx_need - 5 - rxbuf[4];
+			fragment_pending=0;
 			handle_plain();
 			rx_have = 0;
 			rx_state = enc_on ? ST_ENC : ST_HEADER;
