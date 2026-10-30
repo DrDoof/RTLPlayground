@@ -649,6 +649,12 @@ static void scenario_upload_reset_owner(void)
 		CHECK(reset_calls == 0, "new connection ACK cannot inherit reset");
 	}
 
+	/* A new owner clears upload state; establish this test upload explicitly. */
+	verify_crc = 1;
+	boundary[0] = 0;
+	upload_settings.p = &byte;
+	upload_settings.bptr = 0;
+	upload_settings.plen = 1;
 	crc_final = 0;
 	bindex = 0;
 	stream_upload();

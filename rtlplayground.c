@@ -243,6 +243,10 @@ void isr_serial(void) __interrupt(4)
 __xdata uint8_t cmd_capture;
 extern __xdata uint8_t outbuf[TCP_OUTBUF_SIZE];
 extern __xdata uint16_t slen;
+#ifdef SSH
+extern __xdata uint8_t ssh_command_buf[TCP_OUTBUF_SIZE];
+extern __xdata uint16_t ssh_command_len;
+#endif
 
 void write_char_no_syslog(char c)
 {
@@ -250,6 +254,14 @@ void write_char_no_syslog(char c)
 	 * printed through print_string_no_syslog() are captured too: those are
 	 * the replies of the syslog commands, which must not generate a syslog
 	 * packet but do belong in the answer to a command sent over HTTP. */
+	#ifdef SSH
+	if (cmd_capture == 3 || cmd_capture == 4) {
+		if (ssh_command_len < TCP_OUTBUF_SIZE)
+			ssh_command_buf[ssh_command_len++] = c;
+		else
+			cmd_capture = 4;
+	} else
+	#endif
 	if (cmd_capture) {
 		if (slen < TCP_OUTBUF_SIZE - sizeof(CMD_TRUNCATED))
 			outbuf[slen++] = c;

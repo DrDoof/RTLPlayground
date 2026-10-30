@@ -6,6 +6,7 @@
 #include "sha512.h"
 #include "ed25519.h"
 #include "ed25519_consts.h"
+#include "ed25519_comb.h"
 
 __xdata uint8_t ed_sig[64];
 __xdata uint8_t ed_pub[32];
@@ -138,6 +139,26 @@ static void ed_add_base(void)
 	FE_MUL(pz, ef, eg);
 }
 
+/* Scan every public table entry in the same order for every secret digit.
+ * Fold all four bits into bit 0, then form ff for equality using 8-bit math.
+ * The SDCC listing must be reviewed when changing this expression. */
+static void ed_select_comb(uint8_t digit)
+{
+	static __xdata uint8_t row, j, mask;
+	__code const uint8_t *p = &ed_comb[0][0];
+
+	for (j = 0; j < 96; j++)
+		bp[j] = 0;
+	for (row = 0; row < 16; row++) {
+		mask = digit ^ row;
+		mask |= mask >> 2;
+		mask |= mask >> 1;
+		mask = (mask & 1) - 1;
+		for (j = 0; j < 96; j++)
+			bp[j] |= *p++ & mask;
+	}
+}
+
 void ed_init(void)
 {
 	copyc(ed_pub, ed_key_pub, 32);
@@ -185,13 +206,17 @@ uint8_t ed_sign_step(void)
 		}
 		py[0] = 1;
 		pz[0] = 1;
-		es_pos = 252;
+		es_pos = 63;
 		es_state = 1;
 		return 0;
 	case 1:
 		ed_double();
-		if ((sc_r[es_pos >> 3] >> (es_pos & 7)) & 1)
-			ed_add_base();
+		/* Four scalar columns spaced 64 bits apart; all indices are public. */
+		ed_select_comb(((sc_r[es_pos >> 3] >> (es_pos & 7)) & 1)
+			| (((sc_r[8 + (es_pos >> 3)] >> (es_pos & 7)) & 1) << 1)
+			| (((sc_r[16 + (es_pos >> 3)] >> (es_pos & 7)) & 1) << 2)
+			| (((sc_r[24 + (es_pos >> 3)] >> (es_pos & 7)) & 1) << 3));
+		ed_add_base();
 		if (--es_pos < 0) {
 			fe_inv_start(ee, pz);
 			es_state = 2;

@@ -4,10 +4,13 @@
 #include <stdint.h>
 
 #define SSH_PORT 22
+#define SSH_WIRE_MAX 1460
+void ssh_timeout(uint32_t tick) __reentrant;
 
 void ssh_init(void);
 void ssh_reset(void);
 void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant;
+void ssh_input_eof(void);
 uint16_t ssh_output(__xdata uint8_t *out, uint16_t max, uint8_t rexmit) __reentrant;
 void ssh_acked(void);
 void ssh_poll(void);

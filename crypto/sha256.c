@@ -26,32 +26,52 @@ static __code const uint32_t iv[8] = {
 
 #define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
 
-static void sha256_block(void) __reentrant
-{
-	uint8_t i;
-	__xdata uint8_t *p = sha256.buf;
-
+/* The existing SHA-256 context and working words have one foreground owner.
+ * These reentrant helpers add no shared workspace; splitting their temporary
+ * lifetimes reduces SDCC stack spills. ISR callers remain prohibited, as before.
+ */
+static void load_words(void) __reentrant {
+ uint8_t i; __xdata uint8_t *p=sha256.buf;
 	for (i = 0; i < 16; i++) {
 		w[i] = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint16_t)p[2] << 8) | p[3];
 		p += 4;
 	}
-	a = sha256.h[0]; b = sha256.h[1]; c = sha256.h[2]; d = sha256.h[3];
-	e = sha256.h[4]; f = sha256.h[5]; g = sha256.h[6]; h = sha256.h[7];
-	for (i = 0; i < 64; i++) {
-		if (i >= 16) {
-			t1 = w[(i + 1) & 15];
-			t2 = w[(i + 14) & 15];
-			w[i & 15] += (ROTR(t1, 7) ^ ROTR(t1, 18) ^ (t1 >> 3))
-				+ (ROTR(t2, 17) ^ ROTR(t2, 19) ^ (t2 >> 10))
-				+ w[(i + 9) & 15];
-		}
-		t1 = h + (ROTR(e, 6) ^ ROTR(e, 11) ^ ROTR(e, 25)) + ((e & f) ^ (~e & g)) + k[i] + w[i & 15];
-		t2 = (ROTR(a, 2) ^ ROTR(a, 13) ^ ROTR(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
-		h = g; g = f; f = e; e = d + t1;
-		d = c; c = b; b = a; a = t1 + t2;
-	}
+}
+static void schedule(uint8_t i) __reentrant {
+ t1=ROTR(w[(i+1)&15],7);
+ t1^=ROTR(w[(i+1)&15],18);
+ t1^=w[(i+1)&15]>>3;
+ t2=ROTR(w[(i+14)&15],17);
+ t2^=ROTR(w[(i+14)&15],19);
+ t2^=w[(i+14)&15]>>10;
+ t1+=t2; t1+=w[(i+9)&15]; w[i&15]+=t1;
+}
+static void round_first(uint8_t i) __reentrant {
+ t1=ROTR(e,6); t1^=ROTR(e,11); t1^=ROTR(e,25);
+ /* Ch(e,f,g) = g ^ (e & (f ^ g)). */
+ t1+=g^(e&(f^g)); t1+=h; t1+=k[i]; t1+=w[i&15];
+}
+static void round_second(void) __reentrant {
+ t2=ROTR(a,2); t2^=ROTR(a,13); t2^=ROTR(a,22);
+ /* Maj(a,b,c) = (a & b) | (c & (a | b)). */
+ t2+=(a&b)|(c&(a|b));
+}
+static void finish_block(void) __reentrant {
 	sha256.h[0] += a; sha256.h[1] += b; sha256.h[2] += c; sha256.h[3] += d;
 	sha256.h[4] += e; sha256.h[5] += f; sha256.h[6] += g; sha256.h[7] += h;
+
+}
+static void sha256_block(void) __reentrant {
+ uint8_t i;
+ load_words();
+	a = sha256.h[0]; b = sha256.h[1]; c = sha256.h[2]; d = sha256.h[3];
+	e = sha256.h[4]; f = sha256.h[5]; g = sha256.h[6]; h = sha256.h[7];
+ for(i=0;i<64;i++) {
+  if(i>=16) schedule(i);
+  round_first(i); round_second();
+  h=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2;
+ }
+ finish_block();
 }
 
 void sha256_init(void)

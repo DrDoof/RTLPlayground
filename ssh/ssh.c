@@ -9,6 +9,8 @@
 #include "../crypto/ed25519.h"
 
 #define RXMAX 512
+#define KEXMAX 4096
+#define VERSIONMAX 253
 #define TXQMAX 512
 #define LINEMAX 64
 #define LOCAL_WINDOW 4096
@@ -60,6 +62,10 @@ static __xdata uint32_t rx_seq, tx_seq;
 static __xdata uint8_t txq[TXQMAX];
 static __xdata uint16_t txq_len;
 static __xdata uint16_t fl_q, fl_src, fl_win;
+static __xdata uint8_t flight[SSH_WIRE_MAX];
+static __xdata uint16_t flight_len;
+static __xdata uint32_t clock_tick, phase_at, fragment_at, stall_at;
+static __xdata uint8_t phase, fragment_pending, stall_pending;
 static __xdata uint8_t fl_pkts, fl_on;
 
 static __xdata uint8_t kex_state;
@@ -71,6 +77,7 @@ static __xdata uint8_t key_c2s[64], key_s2c[64];
 static __xdata uint8_t enc_on;
 
 static __xdata uint8_t authed, closing;
+static __xdata uint8_t service_ready, skip_guess;
 static __xdata uint32_t chan_peer, remote_window, remote_maxpkt;
 static __xdata uint16_t local_window;
 static __xdata uint8_t chan_open, pty, shell, exec_done, close_sent;
@@ -88,16 +95,39 @@ static __xdata uint8_t tag[16];
 static __xdata const uint8_t * __xdata rp;
 static __xdata uint16_t rlen;
 
+/* Sticky, terminal rejection: do not drain or retransmit partially built data. */
+static void reject(void)
+{
+	closing = 1;
+	authed = chan_open = 0;
+	txq_len = src_len = src_pos = 0;
+	fl_on = 0;
+	flight_len = 0;
+	fragment_pending = stall_pending = 0;
+	rlen = 0;
+}
+
+void ssh_input_eof(void)
+{
+	reject();
+}
+
 static __xdata uint16_t emit_count;
 
 static void put_x(__xdata const uint8_t *p, uint16_t n) __reentrant
 {
+	if (closing)
+		return;
 	if (emit_hash == 2) {
 		emit_count += n;
 		return;
 	}
 	if (emit_hash) {
 		sha256_update(p, n);
+		return;
+	}
+	if (n > (uint16_t)(txq + TXQMAX - emit_dst)) {
+		reject();
 		return;
 	}
 	while (n--)
@@ -189,6 +219,12 @@ static __xdata uint8_t * __xdata q_hdr;
 
 static void q_begin(uint8_t flags)
 {
+	if (closing)
+		return;
+	if (txq_len > TXQMAX - 3) {
+		reject();
+		return;
+	}
 	q_hdr = txq + txq_len;
 	q_hdr[2] = flags;
 	emit_hash = 0;
@@ -199,6 +235,8 @@ static void q_end(void)
 {
 	static __xdata uint16_t n;
 
+	if (closing)
+		return;
 	n = emit_dst - q_hdr - 3;
 	q_hdr[0] = n >> 8;
 	q_hdr[1] = n;
@@ -207,7 +245,7 @@ static void q_end(void)
 
 static uint8_t q_room(uint16_t n)
 {
-	return txq_len + n + 3 <= TXQMAX;
+	return n <= TXQMAX - 3 && txq_len <= TXQMAX - 3 - n;
 }
 
 static void seq_bytes(uint32_t s)
@@ -285,6 +323,10 @@ static void write_packet(void) __reentrant
 	for (i = 0; i < pad; i++)
 		*wp++ = 0;
 	if (!(pk_flags & F_PLAIN)) {
+		if (tx_seq >= 0xffffffffUL - fl_pkts) {
+			reject();
+			return;
+		}
 		seq_bytes(tx_seq + fl_pkts);
 		ssh_chacha_xor(key_s2c + 32, seqb, 0, start, 4);
 		ssh_chacha_xor(key_s2c, seqb, 1, start + 4, body);
@@ -301,17 +343,22 @@ static __xdata uint8_t cbuf[LOCAL_MAXPKT];
 
 uint16_t ssh_output(__xdata uint8_t *out, uint16_t max, uint8_t rexmit) __reentrant
 {
-	static __xdata uint16_t qpos, n, lim_q, lim_src, take, room, i, j;
+	static __xdata uint16_t qpos, n, take, room, i, j;
 
-	if (fl_on && !rexmit)
+	if (closing && !txq_len)
 		return 0;
-	lim_q = rexmit ? fl_q : 0xffff;
-	lim_src = rexmit ? fl_src : 0xffff;
+	if (rexmit) {
+		if (!fl_on || max < flight_len) return 0;
+		for (i = 0; i < flight_len; i++) out[i] = flight[i];
+		return flight_len;
+	}
+	if (fl_on) return 0;
+	if (max > SSH_WIRE_MAX) max = SSH_WIRE_MAX;
 	wp = out;
 	wleft = max;
 	fl_pkts = 0;
 	qpos = 0;
-	while (qpos < txq_len && qpos < lim_q) {
+	while (qpos < txq_len) {
 		n = ((uint16_t)txq[qpos] << 8) | txq[qpos + 1];
 		pk_flags = txq[qpos + 2];
 		if (pkt_size(n, pk_flags) > wleft)
@@ -320,6 +367,8 @@ uint16_t ssh_output(__xdata uint8_t *out, uint16_t max, uint8_t rexmit) __reentr
 		pk_len = n;
 		pk_prelen = 0;
 		write_packet();
+		if (closing && !txq_len)
+			return 0;
 		qpos += n + 3;
 	}
 	take = 0;
@@ -332,7 +381,7 @@ uint16_t ssh_output(__xdata uint8_t *out, uint16_t max, uint8_t rexmit) __reentr
 		if (room > remote_maxpkt)
 			room = remote_maxpkt;
 		j = 0;
-		while (take < src_len - src_pos && take < lim_src) {
+		while (take < src_len - src_pos) {
 			if (pty && ssh_port_out[src_pos + take] == '\n') {
 				if (j + 2 > room)
 					break;
@@ -358,16 +407,22 @@ uint16_t ssh_output(__xdata uint8_t *out, uint16_t max, uint8_t rexmit) __reentr
 			pk_len = j;
 			pk_flags = 0;
 			write_packet();
+			if (closing && !txq_len)
+				return 0;
 		}
 		i = j;
 	} else {
 		i = 0;
 	}
-	if (!rexmit) {
+	{ /* New-flight commit: retransmissions returned before serialization. */
 		fl_q = qpos;
 		fl_src = take;
 		fl_win = i;
-		fl_on = wp != out;
+		/* Reserve source credit once, before callbacks can enqueue more data. */
+		remote_window -= i;
+		flight_len = wp - out;
+		for (i = 0; i < flight_len; i++) flight[i] = out[i];
+		fl_on = flight_len != 0;
 	}
 	return wp - out;
 }
@@ -384,7 +439,7 @@ uint8_t ssh_closing(void)
 
 static void q_chan_data_c(__code const char *s)
 {
-	if (!q_room(20 + clen(s)))
+	if (clen(s) > remote_window || !q_room(20 + clen(s)))
 		return;
 	q_begin(0);
 	put_byte(94);
@@ -396,7 +451,7 @@ static void q_chan_data_c(__code const char *s)
 
 static void q_chan_data_x(__xdata const uint8_t *p, uint8_t n) __reentrant
 {
-	if (!q_room(20 + n))
+	if (n > remote_window || !q_room(20 + n))
 		return;
 	q_begin(0);
 	put_byte(94);
@@ -435,13 +490,14 @@ void ssh_acked(void)
 
 	if (!fl_on)
 		return;
+	if (fl_src || !src_len) stall_at = clock_tick;
 	for (i = fl_q; i < txq_len; i++)
 		txq[i - fl_q] = txq[i];
 	txq_len -= fl_q;
 	src_pos += fl_src;
-	remote_window -= fl_win;
 	tx_seq += fl_pkts;
 	fl_on = 0;
+	flight_len = 0;
 	if (chan_open && src_len && src_pos >= src_len) {
 		src_pos = src_len = 0;
 		if (shell)
@@ -454,6 +510,9 @@ void ssh_acked(void)
 void ssh_reset(void)
 {
 	rx_have = 0;
+	phase = 0; phase_at = clock_tick;
+	fragment_pending = stall_pending = 0;
+	flight_len = 0;
 	rx_state = ST_VERSION;
 	rx_seq = tx_seq = 0;
 	txq_len = 0;
@@ -461,6 +520,7 @@ void ssh_reset(void)
 	kex_state = K_WAIT_KEXINIT;
 	enc_on = 0;
 	authed = closing = 0;
+	service_ready = skip_guess = 0;
 	chan_open = pty = shell = exec_done = close_sent = 0;
 	line_len = 0;
 	src_pos = src_len = 0;
@@ -502,6 +562,26 @@ void ssh_init(void)
 	kex_state = K_DONE;
 	closing = 1;
 	ed_init();
+}
+
+/* Foreground-only absolute deadlines: 200 ticks/s; unrelated traffic never
+ * refreshes phase/fragment deadlines. Successful whole ACK alone advances stall.
+ * All intervals < 2^31; unsigned subtraction handles tick wrap. */
+void ssh_timeout(uint32_t tick) __reentrant
+{
+ static __xdata uint8_t next_phase;
+ clock_tick = tick;
+ if (closing) return;
+ next_phase = rx_state == ST_VERSION ? 0 : (!enc_on ? 1 : (!authed ? 2 : 3));
+ if (next_phase != phase) { phase = next_phase; phase_at = tick; }
+ if ((phase == 0 && (uint32_t)(tick-phase_at) >= 3000UL) ||
+     (phase == 1 && (uint32_t)(tick-phase_at) >= 18000UL) ||
+     (phase == 2 && (uint32_t)(tick-phase_at) >= 12000UL) ||
+     (fragment_pending && (uint32_t)(tick-fragment_at) >= 2000UL)) { reject(); return; }
+ if (txq_len || src_len || fl_on) {
+  if (!stall_pending) { stall_pending=1; stall_at=tick; }
+  else if ((uint32_t)(tick-stall_at) >= 6000UL) reject();
+ } else stall_pending=0;
 }
 
 void ssh_poll(void)
@@ -609,35 +689,47 @@ void ssh_poll(void)
 	}
 }
 
+/* All cursor failures are terminal. Check the full wire width before narrowing. */
+static uint32_t read_u32(void)
+{
+ uint32_t v;
+ v = rp[0];
+ v = (v << 8) | rp[1];
+ v = (v << 8) | rp[2];
+ v = (v << 8) | rp[3];
+ rp += 4; rlen -= 4; return v;
+}
 static uint32_t get_u32(void)
 {
-	uint32_t v;
-
-	if (rlen < 4) {
-		rlen = 0;
-		return 0;
-	}
-	v = ((uint32_t)rp[0] << 24) | ((uint32_t)rp[1] << 16) | ((uint16_t)rp[2] << 8) | rp[3];
-	rp += 4;
-	rlen -= 4;
-	return v;
+ if (closing || rlen < 4) { reject(); return 0; }
+ return read_u32();
 }
-
+static uint8_t get_byte(void)
+{
+ if (closing || !rlen) { reject(); return 0; }
+ rlen--; return *rp++;
+}
 static __xdata const uint8_t * __xdata sp;
 static __xdata uint16_t slen;
-
 static uint8_t get_str(void)
 {
-	slen = get_u32();
-	if (slen > rlen) {
-		rlen = 0;
-		slen = 0;
-		return 0;
-	}
-	sp = rp;
-	rp += slen;
-	rlen -= slen;
-	return 1;
+ static __xdata uint32_t wire_length;
+ sp = rxbuf; slen = 0;
+ wire_length = get_u32();
+ if (closing || wire_length > rlen) { reject(); return 0; }
+ slen = (uint16_t)wire_length; sp = rp; rp += slen; rlen -= slen; return 1;
+}
+static uint8_t parsed(void)
+{
+ if (closing || rlen) { reject(); return 0; }
+ return 1;
+}
+static uint8_t get_bool(void)
+{
+ static __xdata uint8_t b;
+ b = get_byte();
+ if (b > 1) reject();
+ return b;
 }
 
 static uint8_t str_is(__code const char *s)
@@ -706,160 +798,122 @@ static void shell_input(void)
 
 static void handle_enc(uint8_t msg) __reentrant
 {
-	static __xdata uint8_t want;
-	static __xdata uint32_t n;
-
-	if (msg == 1) {
-		closing = 1;
-		return;
-	}
-	if (msg == 2 || msg == 4 || msg == 3)
-		return;
-	if (msg == 5) {
-		get_str();
-		q_begin(0);
-		put_byte(6);
-		put_cstr(n_userauth);
-		q_end();
-		return;
-	}
-	if (msg == 50) {
-		get_str();
-		get_str();
-		get_str();
-		if (str_is(n_password)) {
-			rlen--;
-			rp++;
-			get_str();
-			if (slen < 64 && ssh_port_auth(sp, slen)) {
-				authed = 1;
-				q_simple(52);
-				return;
-			}
-		}
-		q_begin(0);
-		put_byte(51);
-		put_cstr(n_password);
-		put_byte(0);
-		q_end();
-		return;
-	}
-	if (!authed) {
-		closing = 1;
-		return;
-	}
-	if (msg == 80) {
-		get_str();
-		if (rlen && *rp)
-			q_simple(82);
-		return;
-	}
-	if (msg == 90) {
-		get_str();
-		if (!str_is(n_session) || chan_open) {
-			n = get_u32();
-			q_begin(0);
-			put_byte(92);
-			put_u32(n);
-			put_u32(4);
-			put_u32(0);
-			put_u32(0);
-			q_end();
-			return;
-		}
-		chan_peer = get_u32();
-		remote_window = get_u32();
-		remote_maxpkt = get_u32();
-		chan_open = 1;
-		local_window = LOCAL_WINDOW;
-		q_begin(0);
-		put_byte(91);
-		put_u32(chan_peer);
-		put_u32(0);
-		put_u32(LOCAL_WINDOW);
-		put_u32(LOCAL_MAXPKT);
-		q_end();
-		return;
-	}
-	if (msg == 97) {
-		if (!close_sent)
-			q_chan_close();
-		closing = 1;
-		return;
-	}
-	if (!chan_open)
-		return;
-	if (msg == 93) {
-		get_u32();
-		remote_window += get_u32();
-		return;
-	}
-	if (msg == 94) {
-		get_u32();
-		get_str();
-		local_window -= slen;
-		if (shell)
-			shell_input();
-		if (local_window < LOCAL_WINDOW / 2) {
-			q_begin(0);
-			put_byte(93);
-			put_u32(chan_peer);
-			put_u32(LOCAL_WINDOW - local_window);
-			q_end();
-			local_window = LOCAL_WINDOW;
-		}
-		return;
-	}
-	if (msg == 96)
-		return;
-	if (msg == 98) {
-		get_u32();
-		get_str();
-		want = rlen ? *rp : 0;
-		rp++;
-		rlen--;
-		if (str_is(n_ptyreq)) {
-			pty = 1;
-		} else if (str_is(n_shell)) {
-			shell = 1;
-		} else if (str_is(n_exec)) {
-			get_str();
-			if (slen > LINEMAX)
-				slen = LINEMAX;
-			for (line_len = 0; line_len < slen; line_len++)
-				line[line_len] = sp[line_len];
-			run_line();
-			exec_done = 1;
-		} else {
-			if (want)
-				q_chan_simple(100);
-			return;
-		}
-		if (want)
-			q_chan_simple(99);
-		if (shell)
-			q_chan_data_c(banner);
-		else if (exec_done && !src_len)
-			q_chan_close();
-		return;
-	}
-	n = rx_seq - 1;
-	q_begin(0);
-	put_byte(3);
-	put_u32(n);
-	q_end();
+ static __xdata uint8_t want, kind;
+ static __xdata uint16_t i;
+ static __xdata uint32_t n, window, maximum;
+ if (!enc_on || kex_state != K_DONE) { reject(); return; }
+ if (msg == 1) {
+  get_u32(); get_str(); get_str(); parsed(); reject(); return;
+ }
+ if (msg == 2 || msg == 3 || msg == 4) {
+  if (msg == 3) get_u32();
+  else { if (msg == 4) get_bool(); get_str(); if (msg == 4) get_str(); }
+  parsed(); return;
+ }
+ if (msg == 5) {
+  get_str();
+  if (!parsed() || !str_is(n_userauth) || service_ready) { reject(); return; }
+  q_begin(0); put_byte(6); put_cstr(n_userauth); q_end();
+  if (!closing) service_ready = 1;
+  return;
+ }
+ if (msg == 50) {
+  if (!service_ready || authed) { reject(); return; }
+  get_str(); /* Account policy is unchanged; the username remains syntactically bounded. */
+  get_str();
+  if (closing || !str_is("ssh-connection")) { reject(); return; }
+  get_str();
+  if (closing) return;
+  if (str_is(n_password)) {
+   want = get_bool(); get_str();
+   if (want) { get_str(); if (!parsed()) return; }
+   else {
+    if (!parsed()) return;
+    if (slen < 64 && ssh_port_auth(sp, slen)) { authed = 1; q_simple(52); return; }
+   }
+  } else if (str_is(n_none)) { if (!parsed()) return; }
+  /* Unsupported methods have method-specific opaque, already bounded tails. */
+  q_begin(0); put_byte(51); put_cstr(n_password); put_byte(0); q_end(); return;
+ }
+ if (!authed) { reject(); return; }
+ if (msg == 80) {
+  get_str(); want = get_bool(); if (closing) return;
+  if (want) q_simple(82); return;
+ }
+ if (msg == 90) {
+  get_str(); kind = str_is(n_session);
+  n = get_u32(); window = get_u32(); maximum = get_u32();
+  if (closing || (kind && !parsed()) || !maximum) { reject(); return; }
+  if (!kind || chan_open) {
+   q_begin(0); put_byte(92); put_u32(n); put_u32(4); put_u32(0); put_u32(0); q_end(); return;
+  }
+  chan_peer = n; remote_window = window; remote_maxpkt = maximum;
+  chan_open = 1; local_window = LOCAL_WINDOW;
+  q_begin(0); put_byte(91); put_u32(chan_peer); put_u32(0);
+  put_u32(LOCAL_WINDOW); put_u32(LOCAL_MAXPKT); q_end(); return;
+ }
+ if (msg == 93 || msg == 94 || msg == 96 || msg == 97 || msg == 98) {
+  n = get_u32();
+  if (closing || !chan_open || n != 0) { reject(); return; }
+ }
+ if (msg == 93) {
+  n = get_u32();
+  if (!parsed()) return;
+  if (n > 0xffffffffUL - remote_window) { reject(); return; }
+  remote_window += n; return;
+ }
+ if (msg == 94) {
+  get_str(); if (!parsed()) return;
+  if (slen > local_window || slen > LOCAL_MAXPKT) { reject(); return; }
+  local_window -= slen;
+  if (shell) shell_input();
+  if (!closing && local_window < LOCAL_WINDOW / 2) {
+   q_begin(0); put_byte(93); put_u32(chan_peer); put_u32(LOCAL_WINDOW-local_window); q_end();
+   local_window = LOCAL_WINDOW;
+  }
+  return;
+ }
+ if (msg == 96) { parsed(); return; }
+ if (msg == 97) {
+  if (!parsed()) return;
+  if (!close_sent) q_chan_close(); closing = 1; return;
+ }
+ if (msg == 98) {
+  get_str(); want = get_bool(); if (closing) return;
+  if (str_is(n_ptyreq)) {
+   get_str(); get_u32(); get_u32(); get_u32(); get_u32(); get_str();
+   if (!parsed()) return;
+   if (shell || exec_done || src_len || fl_on) { reject(); return; }
+   pty = 1;
+  } else if (str_is(n_shell)) {
+   if (!parsed()) return;
+   if (shell || exec_done || src_len) { reject(); return; }
+   shell = 1;
+  } else if (str_is(n_exec)) {
+   get_str(); if (!parsed()) return;
+   if (slen > LINEMAX || shell || exec_done || src_len) { reject(); return; }
+   for (i=0; i<slen; i++) if (!sp[i]) { reject(); return; }
+   for (line_len=0; line_len<slen; line_len++) line[line_len]=sp[line_len];
+   run_line(); exec_done=1;
+  } else { if (want) q_chan_simple(100); return; }
+  if (want) q_chan_simple(99);
+  if (shell) q_chan_data_c(banner);
+  else if (exec_done && !src_len) q_chan_close();
+  return;
+ }
+ q_begin(0); put_byte(3); put_u32(rx_seq-1); q_end();
 }
 
 static void handle_plain(void)
 {
 	static __xdata uint8_t i;
 
-	if (rlen < 1)
-		return;
+	if (rlen < 1) { reject(); return; }
+	if (skip_guess) { skip_guess = 0; return; }
 	if (rxbuf[5] == 30 && kex_state == K_WAIT_ECDH) {
 		rp = rxbuf + 6;
 		rlen--;
-		if (!get_str() || slen != 32) {
+		if (!get_str() || slen != 32 || !parsed()) {
 			closing = 1;
 			return;
 		}
@@ -868,7 +922,7 @@ static void handle_plain(void)
 		kex_state = K_GOT_ECDH;
 		return;
 	}
-	if (rxbuf[5] == 21 && kex_state == K_WAIT_NEWKEYS) {
+	if (rxbuf[5] == 21 && rlen == 1 && kex_state == K_WAIT_NEWKEYS) {
 		enc_on = 1;
 		kex_state = K_DONE;
 		return;
@@ -892,39 +946,123 @@ static uint8_t open_enc(void)
 	if (d)
 		return 0;
 	ssh_chacha_xor(key_c2s, seqb, 1, rxbuf + 4, len);
-	if (rxbuf[4] + 2 > len)
+	if (rxbuf[4] < 4 || (uint16_t)rxbuf[4] + 2 > len)
 		return 0;
 	rp = rxbuf + 6;
 	rlen = len - rxbuf[4] - 2;
 	return 1;
 }
 
+/* Validate KEXINIT incrementally without allocating another packet buffer.
+ * The transcript still hashes the exact accepted wire payload, including names
+ * that are not selected. Four-byte lengths are bounded before narrowing. */
+static __xdata uint8_t ks_state, ks_field, ks_n, ks_match, ks_found, ks_first, ks_guess;
+static __xdata uint16_t ks_left, ks_pos, ks_remaining;
+static __xdata uint32_t ks_length;
+static __code const char * __xdata ks_expected;
+static void kex_start(uint16_t size)
+{
+ ks_state=0; ks_field=0; ks_n=0; ks_remaining=size; ks_guess=1;
+}
+static void kex_next(void)
+{
+ ks_field++; ks_n=0; ks_length=0;
+ ks_state = ks_field == 10 ? 4 : 2;
+}
+static void kex_name_end(void)
+{
+ if (!ks_pos) { reject(); return; }
+ if (ks_match && ks_expected && !ks_expected[ks_pos]) ks_found=1;
+ else if (ks_first && ks_field < 2) ks_guess=0;
+ ks_first=0; ks_pos=0; ks_match=1;
+}
+/* Leaf helper: private existing KEX state; never invoked from interrupts. */
+static uint8_t kex_length_byte(uint8_t b)
+{
+ ks_length=(ks_length<<8)|b;
+ return ks_length <= ks_remaining;
+}
+static void kex_byte(uint8_t b)
+{
+ if (!ks_remaining || ks_state == 6) { reject(); return; }
+ ks_remaining--;
+ if (ks_state == 0) {
+  if (b != 20) { reject(); return; }
+  ks_state=1; ks_n=16;
+ } else if (ks_state == 1) {
+  if (!--ks_n) { ks_state=2; ks_length=0; }
+ } else if (ks_state == 2) {
+  if (++ks_n != 4) { kex_length_byte(b); return; }
+  if (!kex_length_byte(b)) { reject(); return; }
+  if (ks_field == 0) ks_expected = n_kex;
+  else if (ks_field == 1) ks_expected = n_hostkey;
+  else if (ks_field < 4) ks_expected = n_cipher;
+  else if (ks_field == 6 || ks_field == 7) ks_expected = n_none;
+  else ks_expected = 0;
+  ks_left=(uint16_t)ks_length; ks_pos=0; ks_match=1; ks_found=0; ks_first=1;
+  if (!ks_left) {
+   if (ks_expected) { reject(); return; }
+   kex_next();
+  } else ks_state=3;
+ } else if (ks_state == 3) {
+  if (b == ',') kex_name_end();
+  else {
+   if (b < 33 || b > 126) { reject(); return; }
+   if (ks_expected && ks_match && ks_expected[ks_pos] != b) ks_match=0;
+   ks_pos++;
+  }
+  if (closing) return;
+  if (!--ks_left) {
+   kex_name_end(); if (closing) return;
+   if (ks_expected && !ks_found) { reject(); return; }
+   kex_next();
+  }
+ } else if (ks_state == 4) {
+  if (b > 1) { reject(); return; }
+  skip_guess=b && !ks_guess; ks_n=4; ks_state=5;
+ } else {
+  if (b) { reject(); return; }
+  if (!--ks_n) ks_state=6;
+ }
+}
+
 void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant
 {
-	static __xdata uint16_t k, plen;
+	static __xdata uint16_t k, plen, j;
+	static __xdata uint32_t wire_length;
 	static __xdata uint8_t c;
 
 	while (n && !closing) {
+		if (!fragment_pending) { fragment_pending=1; fragment_at=clock_tick; }
 		if (rx_state == ST_VERSION) {
 			c = *p++;
 			n--;
 			if (c == '\n') {
 				if (rx_have && rxbuf[rx_have - 1] == '\r')
 					rx_have--;
-				emit_hash = 1;
-				sha256_init();
+                if (rx_have < 9 || rxbuf[0]!='S' || rxbuf[1]!='S' || rxbuf[2]!='H' || rxbuf[3]!='-' ||
+                    !((rxbuf[4]=='2' && rxbuf[5]=='.' && rxbuf[6]=='0' && rxbuf[7]=='-') ||
+                      (rx_have>=10 && rxbuf[4]=='1' && rxbuf[5]=='.' && rxbuf[6]=='9' && rxbuf[7]=='9' && rxbuf[8]=='-'))) {
+                    reject(); return;
+                }
+                for (j=0; j<rx_have; j++) if (rxbuf[j]<32 || rxbuf[j]>126) { reject(); return; }
+                emit_hash = 1;
+                sha256_init();
 				put_str(rxbuf, rx_have);
 				put_u32(clen(v_s));
 				put_c(v_s);
+				fragment_pending=0;
 				rx_have = 0;
 				rx_need = 5;
 				rx_state = ST_HEADER;
-			} else if (rx_have < RXMAX) {
-				rxbuf[rx_have++] = c;
-			}
+			} else {
+                if (rx_have >= VERSIONMAX+1 || (rx_have == VERSIONMAX && c != '\r')) { reject(); return; }
+                rxbuf[rx_have++] = c;
+            }
 			continue;
 		}
 		if (rx_state == ST_ENC) {
+            if (rx_need > RXMAX || rx_have >= rx_need) { reject(); return; }
 			k = rx_need - rx_have;
 			if (k > n)
 				k = n;
@@ -937,18 +1075,16 @@ void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant
 				for (c = 0; c < 4; c++)
 					tmp4[c] = rxbuf[c];
 				ssh_chacha_xor(key_c2s + 32, seqb, 0, tmp4, 4);
-				if (tmp4[0] || tmp4[1] || ((uint16_t)tmp4[2] << 8 | tmp4[3]) > RXMAX - 20 ||
-				    (((uint16_t)tmp4[2] << 8 | tmp4[3]) & 7)) {
-					closing = 1;
-					return;
-				}
-				rx_need = 4 + ((uint16_t)tmp4[2] << 8 | tmp4[3]) + 16;
+                wire_length=((uint32_t)tmp4[0]<<24)|((uint32_t)tmp4[1]<<16)|((uint16_t)tmp4[2]<<8)|tmp4[3];
+                if (wire_length < 8 || wire_length > RXMAX-20 || (wire_length & 7)) { reject(); return; }
+                rx_need=(uint16_t)wire_length + 20;
 			} else if (rx_have == rx_need && rx_need > 4) {
-				if (!open_enc()) {
-					closing = 1;
+				if (!open_enc() || rx_seq == 0xffffffffUL) {
+					reject();
 					return;
 				}
 				rx_seq++;
+				fragment_pending=0;
 				handle_enc(rxbuf[5]);
 				rx_have = 0;
 				rx_need = 4;
@@ -960,11 +1096,12 @@ void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant
 			n--;
 			if (rx_have < 5)
 				continue;
-			plen = ((uint16_t)rxbuf[2] << 8) | rxbuf[3];
-			if (rxbuf[0] || rxbuf[1] || plen < rxbuf[4] + 1) {
-				closing = 1;
-				return;
-			}
+            wire_length=((uint32_t)rxbuf[0]<<24)|((uint32_t)rxbuf[1]<<16)|((uint16_t)rxbuf[2]<<8)|rxbuf[3];
+            if (wire_length < 12 || wire_length > (kex_state == K_WAIT_KEXINIT ? KEXMAX-4 : RXMAX-4) ||
+                ((wire_length+4) & 7) || rxbuf[4] < 4 || wire_length < (uint16_t)rxbuf[4]+2) {
+                reject(); return;
+            }
+            plen=(uint16_t)wire_length;
 			rx_left = plen - 1;
 			if (kex_state == K_WAIT_KEXINIT) {
 				if (rx_left <= rxbuf[4]) {
@@ -974,9 +1111,10 @@ void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant
 				emit_hash = 1;
 				put_u32(rx_left - rxbuf[4]);
 				rx_need = rx_left - rxbuf[4];
+                kex_start(rx_need);
 				rx_state = ST_KEXINIT;
 			} else {
-				if (plen + 4 > RXMAX) {
+				if (plen > RXMAX - 4) {
 					closing = 1;
 					return;
 				}
@@ -991,13 +1129,15 @@ void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant
 				k = n;
 			if (rx_need) {
 				plen = k < rx_need ? k : rx_need;
-				sha256_update(p, plen);
+				for (j=0; j<plen; j++) { kex_byte(p[j]); if (closing) return; }
+                sha256_update(p, plen);
 				rx_need -= plen;
 			}
 			p += k;
 			n -= k;
 			rx_left -= k;
 			if (!rx_left) {
+                if (ks_state != 6 || ks_remaining || rx_seq == 0xffffffffUL) { reject(); return; }
 				emit_hash = 2;
 				emit_count = 0;
 				put_kexinit();
@@ -1006,6 +1146,7 @@ void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant
 				put_kexinit();
 				put_hostkey();
 				rx_seq++;
+				fragment_pending=0;
 				kex_state = K_WAIT_ECDH;
 				rx_have = 0;
 				rx_state = ST_HEADER;
@@ -1013,12 +1154,15 @@ void ssh_input(__xdata const uint8_t *p, uint16_t n) __reentrant
 			continue;
 		}
 		if (rx_state == ST_PLAIN) {
+            if (rx_need > RXMAX || rx_have >= rx_need) { reject(); return; }
 			rxbuf[rx_have++] = *p++;
 			n--;
 			if (rx_have < rx_need)
 				continue;
+			if (rx_seq == 0xffffffffUL) { reject(); return; }
 			rx_seq++;
 			rlen = rx_need - 5 - rxbuf[4];
+			fragment_pending=0;
 			handle_plain();
 			rx_have = 0;
 			rx_state = enc_on ? ST_ENC : ST_HEADER;
