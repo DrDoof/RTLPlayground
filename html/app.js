@@ -5483,7 +5483,7 @@ function fwCheck() {
 }
 tabHooks.fw = {
     enter: function() {
-        fwCheck();
+        pollInfo().then(fwCheck).catch(function() {});
     },
 };
 
